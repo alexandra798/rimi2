@@ -14,10 +14,11 @@ class RewardCalculator:
     - 终止奖励: Reward_end = 合成alpha的IC
     """
 
-    def __init__(self, alpha_pool, lambda_param=0.1, sample_size=10000):
+    def __init__(self, alpha_pool, lambda_param=0.1, sample_size=5000,pool_size=100):
         self.alpha_pool = alpha_pool
         self.lambda_param = lambda_param
         self.sample_size = sample_size  # 采样大小
+        self.pool_size = pool_size
         self.formula_evaluator = FormulaEvaluator()
         self._cache = {}  # 添加缓存
 
@@ -105,8 +106,7 @@ class RewardCalculator:
             # 计算个体IC
             individual_ic = self._calculate_ic(alpha_values, y_data)
 
-            # 生成可读的公式字符串
-            readable_formula = RPNEvaluator.tokens_to_infix(state.token_sequence)
+            readable_formula = ' '.join([t.name for t in state.token_sequence])
 
             # 添加到池中
             new_alpha = {
@@ -121,15 +121,16 @@ class RewardCalculator:
             if not exists:
                 self.alpha_pool.append(new_alpha)
 
-                # 维护池大小
+                # 维护池大小 - 使用self.pool_size
                 if len(self.alpha_pool) > self.pool_size:
                     self.alpha_pool.sort(key=lambda x: abs(x.get('ic', 0)), reverse=True)
                     self.alpha_pool = self.alpha_pool[:self.pool_size]
 
-            # 计算合成IC
+                    # 计算合成IC
             composite_ic = self._calculate_composite_ic(y_data)
 
-            logger.info(f"Terminal: individual_IC={individual_ic:.4f}, composite_IC={composite_ic:.4f}")
+            logger.info(f"Terminal: formula={readable_formula[:50]}...")
+            logger.info(f"  individual_IC={individual_ic:.4f}, composite_IC={composite_ic:.4f}")
 
             return composite_ic
 

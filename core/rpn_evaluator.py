@@ -390,10 +390,32 @@ class RPNEvaluator:
                         result[i] = np.nan
 
                 elif op_name == 'ts_rank':
-                    if len(window_data) > 0:
-                        result[i] = stats.rankdata(window_data)[-1] / len(window_data)
+                    # 优化版本：避免使用lambda函数
+                    def rank_last(x):
+                        if len(x) == 0:
+                            return 0.5
+                        try:
+                            # 使用更高效的方式计算排名
+                            return (x.iloc[-1] > x).sum() / len(x)
+                        except:
+                            return 0.5
+
+                    # 对于大数据集，考虑分块处理
+                    if len(data) > 10000:
+                        # 分块处理避免内存溢出
+                        chunk_size = 5000
+                        results = []
+                        for i in range(0, len(data), chunk_size):
+                            chunk = data.iloc[i:min(i + chunk_size, len(data))]
+                            result = chunk.rolling(window=window, min_periods=1).apply(
+                                rank_last, raw=False
+                            )
+                            results.append(result)
+                        return pd.concat(results)
                     else:
-                        result[i] = 0.5
+                        return data.rolling(window=window, min_periods=1).apply(
+                            rank_last, raw=False
+                        )
 
                 elif op_name == 'ts_mean':
                     result[i] = np.mean(window_data)

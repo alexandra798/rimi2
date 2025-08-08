@@ -50,11 +50,6 @@ def run_mcts_with_token_system(X_train, y_train, num_iterations=200,
     logger.info("Starting MCTS with Token System")
     logger.info(f"Data size: {len(X_train)} rows")
 
-    # 设置更合理的参数
-    if len(X_train) > 100000:
-        logger.warning("Large dataset detected, adjusting parameters...")
-        num_iterations = min(num_iterations, 50)  # 减少迭代次数
-        num_simulations = min(num_simulations, 20)  # 减少模拟次数
 
     # 创建训练器
     trainer = RiskMinerTrainer(X_train, y_train, device=device, use_sampling=True)
@@ -136,10 +131,10 @@ def main(args):
             num_iterations=MCTS_CONFIG['num_iterations'],
             num_simulations=50,
             device=device
-        ).to(device)
+        )
     else:
         logger.info("Using Token system without Policy Network")
-        best_formulas_quantile = None
+        best_formulas_quantile = []
 
     evaluate_formula = FormulaEvaluator()
 
@@ -149,16 +144,34 @@ def main(args):
         lambda_param=ALPHA_POOL_CONFIG['lambda_param']
     )
 
-    # 将最佳公式添加到alpha池
-    for formula, score in best_formulas_quantile:
-        alpha_pool.add_to_pool({'formula': formula, 'score': score})
+    # 修复2：使用正确的方法添加公式到池中
+    if best_formulas_quantile:  # 检查是否为空
+        for formula, score in best_formulas_quantile:
+            #  使用add_to_pool方法（现在存在了）
+            alpha_pool.add_to_pool({
+                'formula': formula,
+                'score': score,
+                'ic': score  # 添加ic字段
+            })
 
-    # 更新alpha池
-    alpha_pool.update_pool(X_train, y_train, evaluate_formula)
+        #  使用update_pool方法（现在存在了）
+        alpha_pool.update_pool(X_train, y_train, evaluate_formula)
 
-    # 获取前5个公式
+    #  使用get_top_formulas方法（现在存在了）
     top_formulas = alpha_pool.get_top_formulas(5)
-    logger.info(f"Top formulas from alpha pool: {top_formulas}")
+
+    if not top_formulas:
+        logger.warning("No formulas found in alpha pool, using default formulas")
+        # 提供一些默认公式作为后备
+        top_formulas = [
+            "BEG close END",
+            "BEG volume END",
+            "BEG close volume div END"
+        ]
+
+    logger.info(f"Top formulas from alpha pool: {len(top_formulas)} formulas")
+    for i, formula in enumerate(top_formulas[:5], 1):
+        logger.info(f"  {i}. {formula[:80]}...")
 
     # 第5部分：应用公式转换数据集
     if args.transform_data:

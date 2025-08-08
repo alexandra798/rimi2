@@ -208,7 +208,7 @@ class RiskMinerTrainer:
             state.add_token(action)
 
         # 转换为可读公式
-        return RPNEvaluator.tokens_to_infix(state.token_sequence)
+        return state.token_sequence
 
     def update_alpha_pool(self, trajectories, iteration):
         """更新Alpha池"""
@@ -225,9 +225,6 @@ class RiskMinerTrainer:
 
             # 检查是否以END结束
             if final_state.token_sequence[-1].name == 'END':
-                # 转换为可读公式
-                formula_str = RPNEvaluator.tokens_to_infix(final_state.token_sequence)
-
                 # 评估公式
                 formula_rpn = ' '.join([t.name for t in final_state.token_sequence])
                 alpha_values = self.formula_evaluator.evaluate(formula_rpn, self.X_data)
@@ -237,7 +234,7 @@ class RiskMinerTrainer:
 
                     # 添加到池中
                     new_formulas.append({
-                        'formula': formula_str,
+                        'formula': formula_rpn,
                         'ic': ic,
                         'values': alpha_values,
                         'iteration': iteration

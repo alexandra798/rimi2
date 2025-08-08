@@ -1,280 +1,271 @@
-"""统一的Alpha公式评估器"""
+"""统一的Alpha公式评估器 - 重构版"""
 import pandas as pd
 import numpy as np
 import logging
-import re
+import signal
+from contextlib import contextmanager
 from functools import lru_cache
-from typing import Union, Dict, Optional
+from typing import Union, Dict, Optional, Any
 
-from core import RPNEvaluator, RPNValidator, TOKEN_DEFINITIONS, Operators
+from core import RPNEvaluator, RPNValidator, TOKEN_DEFINITIONS, TokenType, Operators
 
 logger = logging.getLogger(__name__)
 
 
 class FormulaEvaluator:
-    """统一的公式评估接口 - 支持RPN和传统格式"""
+    """统一的RPN公式评估器 - 所有公式都作为RPN处理"""
 
     def __init__(self):
+
         self.rpn_evaluator = RPNEvaluator
         self.operators = Operators
-        self._cache = {}
+        self._result_cache = {}  # 结果缓存
 
     def evaluate(self, formula: str, data: Union[pd.DataFrame, Dict],
                  allow_partial: bool = False) -> pd.Series:
         """
-        统一的评估接口
+        统一的评估接口 - 所有公式都作为RPN处理
 
         Args:
-            formula: 公式字符串（RPN或传统格式）
+            formula: RPN公式字符串
             data: 数据（DataFrame或字典）
             allow_partial: 是否允许部分表达式
+            use_cache: 是否使用缓存
 
         Returns:
-            评估结果的Series
+            评估结果的Series，失败时返回NaN Series
         """
-        # 检查缓存
-        cache_key = (formula, id(data), allow_partial)
-        if cache_key in self._cache:
-            return self._cache[cache_key]
+        # 生成缓存键
 
-        # 判断公式类型
-        if self.is_rpn_formula(formula):
-            result = self.evaluate_rpn(formula, data, allow_partial)
-        else:
-            result = self.evaluate_traditional(formula, data)
+        cache_key = self._generate_cache_key(formula, data, allow_partial)
+        if cache_key in self._result_cache:
+            logger.debug(f"Cache hit for formula: {formula[:50]}...")
+            return self._result_cache[cache_key].copy()
 
-        # 缓存结果
-        self._cache[cache_key] = result
-
-        return result
-
-    def is_rpn_formula(self, formula: str) -> bool:
-        """判断是否为RPN格式的公式"""
-        rpn_indicators = ['BEG', 'END', 'add', 'sub', 'mul', 'div',
-                          'ts_mean', 'ts_std', 'delta_']
-        return any(indicator in formula for indicator in rpn_indicators)
-
-    def evaluate_rpn(self, formula: str, data: Union[pd.DataFrame, Dict],
-                     allow_partial: bool = False) -> pd.Series:
-        """评估RPN格式的公式"""
+        # 执行评估
         try:
-            # 解析RPN字符串为Token序列
-            token_names = formula.split()
+            result = self._evaluate_impl(formula, data, allow_partial)
+            # 缓存结果
+            if result is not None:
+                self._result_cache[cache_key] = result.copy()
+            return result
+
+        except TimeoutError as e:
+            logger.warning(f"Formula evaluation timed out: {formula[:50]}...")
+            return self._create_nan_series(data)
+        except Exception as e:
+            logger.error(f"Error evaluating formula '{formula[:50]}...': {str(e)}")
+            logger.debug(f"Exception type: {type(e).__name__}", exc_info=True)
+            return self._create_nan_series(data)
+
+    def _evaluate_impl(self, formula: str, data: Union[pd.DataFrame, Dict],
+                       allow_partial: bool) -> pd.Series:
+        """实际的评估实现"""
+        # 解析Token序列
+        token_sequence = self._parse_tokens(formula)
+        if not token_sequence:
+            logger.warning(f"Failed to parse formula: {formula[:50]}...")
+            return self._create_nan_series(data)
+
+        # 验证Token序列
+        if not allow_partial and not self._is_complete_expression(token_sequence):
+            logger.warning(f"Incomplete RPN expression: {formula[:50]}...")
+            if not RPNValidator.is_valid_partial_expression(token_sequence):
+                return self._create_nan_series(data)
+
+        # 准备数据
+        data_dict = self._prepare_data(data)
+        if data_dict is None:
+            return self._create_nan_series(data)
+
+        # 评估RPN表达式
+        try:
+            result = self.rpn_evaluator.evaluate(
+                token_sequence,
+                data_dict,
+                allow_partial=allow_partial
+            )
+
+            # 转换结果为Series
+            return self._convert_to_series(result, data)
+
+        except Exception as e:
+            logger.error(f"RPN evaluation failed: {str(e)}")
+            return self._create_nan_series(data)
+
+    def _parse_tokens(self, formula: str) -> list:
+        """
+        解析公式字符串为Token序列
+        Args:
+            formula: RPN公式字符串
+        Returns:
+            Token序列列表，解析失败返回空列表
+        """
+        try:
+            token_names = formula.strip().split()
             token_sequence = []
 
             for name in token_names:
                 if name in TOKEN_DEFINITIONS:
                     token_sequence.append(TOKEN_DEFINITIONS[name])
                 else:
-                    logger.warning(f"Unknown token in RPN formula: {name}")
-                    if isinstance(data, pd.DataFrame):
-                        return pd.Series(np.nan, index=data.index)
+                    # 尝试解析动态常数（如const_3.14）
+                    if name.startswith('const_'):
+                        try:
+                            value = float(name[6:])  # 去掉'const_'前缀
+                            # 创建动态Token
+                            from core.token_system import Token, TokenType
+                            dynamic_token = Token(TokenType.OPERAND, name, value=value)
+                            token_sequence.append(dynamic_token)
+                        except ValueError:
+                            logger.warning(f"Unknown token: {name}")
+                            return []
                     else:
-                        return pd.Series(np.nan)
+                        logger.warning(f"Unknown token: {name}")
+                        return []
 
-            # 转换数据为字典格式
-            if isinstance(data, pd.DataFrame):
-                data_dict = data.to_dict('series')
-            else:
-                data_dict = data
-
-            # 判断是否为完整表达式
-            is_complete = (len(token_sequence) > 0 and
-                           token_sequence[-1].name == 'END')
-
-            # 使用RPN求值器评估
-            result = self.rpn_evaluator.evaluate(
-                token_sequence,
-                data_dict,
-                allow_partial=allow_partial or not is_complete
-            )
-
-            # 确保返回Series
-            if result is not None:
-                if isinstance(result, pd.Series):
-                    return result
-                else:
-                    if isinstance(data, pd.DataFrame):
-                        return pd.Series(result, index=data.index)
-                    else:
-                        return pd.Series(result)
-            else:
-                if isinstance(data, pd.DataFrame):
-                    return pd.Series(np.nan, index=data.index)
-                else:
-                    return pd.Series(np.nan)
+            return token_sequence
 
         except Exception as e:
-            logger.error(f"Error evaluating RPN formula '{formula}': {e}")
-            if isinstance(data, pd.DataFrame):
-                return pd.Series(np.nan, index=data.index)
-            else:
-                return pd.Series(np.nan)
+            logger.error(f"Token parsing error: {e}")
+            return []
 
-    def evaluate_traditional(self, formula: str, data: pd.DataFrame) -> pd.Series:
-        """评估传统格式的公式"""
-        try:
-            # 清理和验证公式
-            sanitized_formula = self._sanitize_formula(formula)
-            if sanitized_formula is None:
-                logger.error(f"Formula failed security validation: '{formula}'")
-                return pd.Series(np.nan, index=data.index)
-
-            # 创建安全的评估环境
-            safe_dict = {}
-
-            # 添加数据列
-            for col in data.columns:
-                safe_dict[col] = data[col]
-
-            # 添加允许的函数
-            allowed_functions = {
-                'abs': abs,
-                'max': max,
-                'min': min,
-                'sum': sum,
-                'len': len,
-                'safe_divide': self.operators.safe_divide,
-                'ts_ref': self.operators.ts_ref,
-                'csrank': self.operators.csrank,
-                'sign': self.operators.sign,
-                'abs_op': self.operators.abs_op,
-                'log': self.operators.log,
-                'greater': self.operators.greater,
-                'less': self.operators.less,
-                'ts_rank': self.operators.ts_rank,
-                'std': self.operators.std,
-                'ts_max': self.operators.ts_max,
-                'ts_min': self.operators.ts_min,
-                'skew': self.operators.skew,
-                'kurt': self.operators.kurt,
-                'mean': self.operators.mean,
-                'med': self.operators.med,
-                'ts_sum': self.operators.ts_sum,
-                'cov': self.operators.cov,
-                'corr': self.operators.corr,
-                'decay_linear': self.operators.decay_linear,
-                'wma': self.operators.wma,
-                'ema': self.operators.ema,
-                'np': np,
-                'pd': pd,
-            }
-
-            # 验证公式中的变量
-            formula_vars = re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', formula)
-            for var in formula_vars:
-                if var not in safe_dict and var not in allowed_functions:
-                    logger.warning(f"Unknown variable '{var}' in formula: {formula}")
-                    return pd.Series(np.nan, index=data.index)
-
-            safe_dict.update(allowed_functions)
-
-            # 评估公式
-            try:
-                result = pd.eval(sanitized_formula, local_dict=safe_dict, engine='python')
-
-                # 处理结果类型
-                if isinstance(result, (int, float, np.number)):
-                    result = pd.Series(result, index=data.index)
-                elif isinstance(result, np.ndarray):
-                    result = pd.Series(result, index=data.index)
-                elif not isinstance(result, pd.Series):
-                    try:
-                        result = pd.Series(result, index=data.index)
-                    except:
-                        logger.error(f"Cannot convert result to Series for formula: {formula}")
-                        return pd.Series(np.nan, index=data.index)
-
-                # 替换无限值
-                result = result.replace([np.inf, -np.inf], np.nan)
-
-                return result
-
-            except Exception as e:
-                # 尝试使用标准eval
-                if "scalar" in str(e).lower():
-                    try:
-                        eval_dict = {"__builtins__": {}}
-                        eval_dict.update(safe_dict)
-
-                        result = eval(sanitized_formula, eval_dict)
-
-                        if isinstance(result, pd.Series):
-                            return result.replace([np.inf, -np.inf], np.nan)
-                        else:
-                            return pd.Series(result, index=data.index).replace([np.inf, -np.inf], np.nan)
-
-                    except Exception as eval_error:
-                        logger.error(f"Both pd.eval and eval failed for formula '{formula}': {eval_error}")
-                        return pd.Series(np.nan, index=data.index)
-                else:
-                    raise e
-
-        except Exception as e:
-            logger.error(f"Error evaluating formula '{formula}': {e}")
-            return pd.Series(np.nan, index=data.index)
-
-    def _sanitize_formula(self, formula: str) -> Optional[str]:
-        """清理和验证公式安全性"""
-        # 检查不安全的操作
-        unsafe_patterns = [
-            r'__\w+__',
-            r'import\s+',
-            r'exec\s*\(',
-            r'eval\s*\(',
-            r'open\s*\(',
-            r'file\s*\(',
-            r'input\s*\(',
-            r'raw_input\s*\(',
-        ]
-
-        for pattern in unsafe_patterns:
-            if re.search(pattern, formula, re.IGNORECASE):
-                logger.warning(f"Unsafe formula detected: {formula}")
-                return None
-
-        # 验证只包含允许的字符
-        allowed_chars = re.compile(r'^[a-zA-Z0-9_\s\+\-\*\/\(\)\.\,]+$')
-        if not allowed_chars.match(formula):
-            logger.warning(f"Formula contains invalid characters: {formula}")
-            return None
-
-        return formula
-
-    def clear_cache(self):
-        """清除缓存"""
-        self._cache.clear()
-
-    def evaluate_batch(self, formulas: list, data: pd.DataFrame) -> Dict[str, pd.Series]:
+    def _prepare_data(self, data: Union[pd.DataFrame, Dict]) -> Optional[Dict]:
         """
-        批量评估多个公式
+        准备数据为字典格式
 
         Args:
-            formulas: 公式列表
-            data: 数据
+            data: 输入数据
 
         Returns:
-            公式到结果的字典
+            数据字典，失败返回None
         """
-        results = {}
+        try:
+            if isinstance(data, pd.DataFrame):
+                # DataFrame转字典，使用Series格式保留索引信息
+                return data.to_dict('series')
+            elif isinstance(data, dict):
+                # 确保字典值都是Series或数组
+                prepared = {}
+                for key, value in data.items():
+                    if isinstance(value, (pd.Series, np.ndarray)):
+                        prepared[key] = value
+                    else:
+                        # 尝试转换为数组
+                        prepared[key] = np.array(value)
+                return prepared
+            else:
+                logger.error(f"Unsupported data type: {type(data)}")
+                return None
 
-        # 预处理共享数据
-        data_dict = data.to_dict('series') if isinstance(data, pd.DataFrame) else data
+        except Exception as e:
+            logger.error(f"Data preparation error: {e}")
+            return None
 
-        for formula in formulas:
-            results[formula] = self.evaluate(formula, data)
+    def _convert_to_series(self, result: Any, original_data: Union[pd.DataFrame, Dict]) -> pd.Series:
+        """
+        将评估结果转换为Series
 
-        return results
+        Args:
+            result: 评估结果
+            original_data: 原始数据（用于获取索引）
 
-    def evaluate_state(self, state, X_data):
-        """评估状态对应的公式值 - 统一接口"""
+        Returns:
+            结果Series
+        """
+        try:
+            # 如果已经是Series，直接返回
+            if isinstance(result, pd.Series):
+                return result
+
+            # 获取索引
+            if isinstance(original_data, pd.DataFrame):
+                index = original_data.index
+            elif isinstance(original_data, dict):
+                # 从字典中找一个Series获取索引
+                for value in original_data.values():
+                    if isinstance(value, pd.Series):
+                        index = value.index
+                        break
+                else:
+                    index = None
+            else:
+                index = None
+
+            # 转换为Series
+            if isinstance(result, np.ndarray):
+                return pd.Series(result, index=index)
+            elif isinstance(result, (int, float, np.number)):
+                if index is not None:
+                    return pd.Series(result, index=index)
+                else:
+                    return pd.Series([result])
+            else:
+                # 尝试直接转换
+                return pd.Series(result, index=index)
+
+        except Exception as e:
+            logger.error(f"Result conversion error: {e}")
+            return self._create_nan_series(original_data)
+
+    def _create_nan_series(self, data: Union[pd.DataFrame, Dict]) -> pd.Series:
+        """创建NaN Series作为错误返回值"""
+        if isinstance(data, pd.DataFrame):
+            return pd.Series(np.nan, index=data.index)
+        elif isinstance(data, dict):
+            # 尝试从字典中找一个Series获取长度和索引
+            for value in data.values():
+                if isinstance(value, pd.Series):
+                    return pd.Series(np.nan, index=value.index)
+                elif isinstance(value, np.ndarray):
+                    return pd.Series(np.nan, index=range(len(value)))
+        return pd.Series(np.nan)
+
+    def _is_complete_expression(self, token_sequence: list) -> bool:
+        """检查是否为完整的RPN表达式"""
+        if not token_sequence:
+            return False
+
+        # 必须以BEG开始
+        if token_sequence[0].name != 'BEG':
+            return False
+
+        # 可以以END结束（完整）或不以END结束（部分）
+        has_end = token_sequence[-1].name == 'END' if len(token_sequence) > 1 else False
+
+        # 验证栈平衡
+        stack_size = RPNValidator.calculate_stack_size(token_sequence)
+
+        if has_end:
+            return stack_size == 1  # 完整表达式应该留下1个结果
+        else:
+            return stack_size >= 1  # 部分表达式至少有1个元素
+
+    def _generate_cache_key(self, formula: str, data: Any, allow_partial: bool) -> str:
+        """生成缓存键"""
+        # 使用公式和数据ID以及allow_partial标志作为键
+        data_id = id(data)
+        return f"{formula}_{data_id}_{allow_partial}"
+
+    def evaluate_state(self, state, X_data) -> Optional[np.ndarray]:
+        """
+        评估状态对应的公式值
+
+        Args:
+            state: MDPState对象
+            X_data: 数据
+
+        Returns:
+            评估结果的数组，失败返回None
+        """
         try:
             # 构建RPN字符串
             rpn_string = ' '.join([t.name for t in state.token_sequence])
 
-            # 使用统一的evaluate方法
+            # 评估
             result = self.evaluate(rpn_string, X_data, allow_partial=True)
 
+            # 转换为数组
             if result is not None:
                 if hasattr(result, 'values'):
                     return result.values
@@ -286,20 +277,7 @@ class FormulaEvaluator:
             logger.error(f"Error evaluating state: {e}")
             return None
 
-    def evaluate_state_batch(self, states, X_data):
-        """批量评估多个状态 - 减少重复计算"""
-        results = []
 
-        # 如果数据太大，先采样
-        if len(X_data) > 10000:
-            sample_indices = np.random.choice(len(X_data), 10000, replace=False)
-            X_sample = X_data.iloc[sample_indices]
-        else:
-            X_sample = X_data
 
-        for state in states:
-            rpn_string = ' '.join([t.name for t in state.token_sequence])
-            result = self.evaluate(rpn_string, X_sample, allow_partial=True)
-            results.append(result)
 
-        return results
+

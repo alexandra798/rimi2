@@ -48,10 +48,7 @@ class MDPState:
 
         return encoding
 
-    def to_formula_string(self):
-        """将Token序列转换为可读的公式字符串"""
-        from ..core import RPNEvaluator
-        return RPNEvaluator.tokens_to_infix(self.token_sequence)
+
 
     def copy(self):
         """深拷贝状态"""
