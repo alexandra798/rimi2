@@ -12,6 +12,12 @@ MCTS_CONFIG = {
     "c_puct": 1.414,  # sqrt(2) 是常用默认值，可根据实验调整
     "c_puct_decay": 0.995,  # 探索衰减率
     "c_puct_min": 0.5,  # 最小探索值
+
+    'exploration_constant': 1.414,
+    'min_window_size': 3,  # 新增：最小窗口大小
+    'constant_penalty': -1.0,  # 新增：常数惩罚
+    'diversity_bonus': 0.1,  # 新增：多样性奖励
+    'max_constants_per_formula': 2,  # 新增：每个公式最多常数数量
 }
 
 # 风险寻求优化配置
@@ -28,6 +34,10 @@ ALPHA_POOL_CONFIG = {
     "lambda_param": 0.1,  # λ=0.1 (reward-dense MDP)
     "gradient_descent_lr": 0.01,
     "gradient_descent_iters": 100,
+    'min_std': 1e-5,  # 添加：最小标准差阈值
+    'min_unique_ratio': 0.01,  # 添加：最小唯一值比例
+    'min_ic_threshold': 0.01,  # 添加：最小IC阈值
+    'constant_check_sample_size': 1000,
 }
 
 # GRU特征提取器参数

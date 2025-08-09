@@ -8,37 +8,107 @@ logger = logging.getLogger(__name__)
 
 
 class AlphaPool:
-    """论文Algorithm 1的完整实现 - 修复版"""
 
-    def __init__(self, pool_size=100, lambda_param=0.1, learning_rate=0.01):
-        self.pool_size = pool_size  # K
-        self.lambda_param = lambda_param  # λ
+    def __init__(self, pool_size=100, lambda_param=0.1, learning_rate=0.01,
+                 min_std=1e-6, min_unique_ratio=0.01):
+        self.pool_size = pool_size
+        self.lambda_param = lambda_param
         self.learning_rate = learning_rate
 
-        self.alphas = []  # 存储 {formula, values, weight, ic, score}
-        self.model = None  # 线性组合模型
+        # 新增：常数检测参数
+        self.min_std = min_std  # 最小标准差阈值
+        self.min_unique_ratio = min_unique_ratio  # 最小唯一值比例
+
+        self.alphas = []
+        self.model = None
+
+        # 新增：统计信息
+        self.rejected_constant_count = 0
+        self.rejected_low_ic_count = 0
+
+    def is_valid_alpha(self, alpha_values):
+        """
+        检查alpha是否有效（非常数）
+
+        Args:
+            alpha_values: alpha的值序列
+
+        Returns:
+            bool: 是否为有效的非常数alpha
+        """
+        if alpha_values is None:
+            return False
+
+        # 转换为numpy数组
+        if hasattr(alpha_values, 'values'):
+            values = alpha_values.values
+        else:
+            values = np.array(alpha_values)
+
+        # 移除NaN
+        valid_values = values[~np.isnan(values)]
+
+        if len(valid_values) < 10:  # 太少有效值
+            return False
+
+        # 检查1: 标准差
+        std = np.std(valid_values)
+        if std < self.min_std:
+            logger.debug(f"Alpha rejected: nearly constant (std={std:.8f})")
+            self.rejected_constant_count += 1
+            return False
+
+        # 检查2: 唯一值比例
+        unique_count = len(np.unique(valid_values))
+        unique_ratio = unique_count / len(valid_values)
+        if unique_ratio < self.min_unique_ratio:
+            logger.debug(f"Alpha rejected: too few unique values ({unique_ratio:.1%})")
+            self.rejected_constant_count += 1
+            return False
+
+        # 检查3: 变异系数（相对标准差）
+        mean_val = np.mean(valid_values)
+        if abs(mean_val) > 1e-10:  # 避免除零
+            cv = std / abs(mean_val)
+            if cv < 0.001:  # 变异系数太小
+                logger.debug(f"Alpha rejected: low coefficient of variation ({cv:.6f})")
+                self.rejected_constant_count += 1
+                return False
+
+        return True
 
     def add_to_pool(self, alpha_info):
         """
-        添加单个alpha到池中
-
-        Args:
-            alpha_info: 字典，包含 'formula', 'score', 可选 'values', 'ic'
+        Args: alpha_info: 字典，包含 'formula', 'score', 可选 'values', 'ic'
         """
-        # 检查是否已存在
-        if not any(a['formula'] == alpha_info['formula'] for a in self.alphas):
-            # 确保有必要的字段
-            if 'weight' not in alpha_info:
-                alpha_info['weight'] = 1.0 / max(len(self.alphas), 1)
-            if 'ic' not in alpha_info and 'score' in alpha_info:
-                alpha_info['ic'] = alpha_info['score']
+        # 首先检查是否已存在
+        if any(a['formula'] == alpha_info['formula'] for a in self.alphas):
+            return
 
-            self.alphas.append(alpha_info)
-            logger.info(f"Added alpha to pool: {alpha_info['formula'][:50]}...")
+        # 新增：检查alpha有效性
+        if 'values' in alpha_info:
+            if not self.is_valid_alpha(alpha_info['values']):
+                logger.info(f"Rejected constant alpha: {alpha_info['formula'][:50]}...")
+                return
 
-            # 如果超过池大小，移除最差的
-            if len(self.alphas) > self.pool_size:
-                self._remove_worst_alpha()
+        # 新增：检查IC阈值
+        if 'ic' in alpha_info and abs(alpha_info.get('ic', 0)) < 0.01:
+            logger.debug(f"Rejected low IC alpha: IC={alpha_info['ic']:.4f}")
+            self.rejected_low_ic_count += 1
+            return
+
+        # 确保有必要的字段
+        if 'weight' not in alpha_info:
+            alpha_info['weight'] = 1.0 / max(len(self.alphas), 1)
+        if 'ic' not in alpha_info and 'score' in alpha_info:
+            alpha_info['ic'] = alpha_info['score']
+
+        self.alphas.append(alpha_info)
+        logger.info(f"Added valid alpha to pool: {alpha_info['formula'][:50]}... (IC={alpha_info.get('ic', 0):.4f})")
+
+        # 如果超过池大小，移除最差的
+        if len(self.alphas) > self.pool_size:
+            self._remove_worst_alpha()
 
     def update_pool(self, X_data, y_data, evaluate_formula):
         """
@@ -52,7 +122,9 @@ class AlphaPool:
         logger.info(f"Updating alpha pool with {len(self.alphas)} formulas...")
 
         # 1. 评估所有没有values的alpha
-        for alpha in self.alphas:
+        alphas_to_remove = []
+
+        for i, alpha in enumerate(self.alphas):
             if 'values' not in alpha or alpha['values'] is None:
                 try:
                     alpha['values'] = evaluate_formula.evaluate(
@@ -61,19 +133,30 @@ class AlphaPool:
                         allow_partial=False
                     )
 
+                    # 检查有效性
+                    if not self.is_valid_alpha(alpha['values']):
+                        alphas_to_remove.append(i)
+                        continue
+
                     # 计算IC
                     if alpha['values'] is not None and not alpha['values'].isna().all():
                         alpha['ic'] = self._calculate_ic(alpha['values'], y_data)
+
+                        # 检查IC阈值
+                        if abs(alpha['ic']) < 0.01:
+                            alphas_to_remove.append(i)
+                            logger.debug(f"Removing low IC alpha: {alpha['formula'][:50]}... (IC={alpha['ic']:.4f})")
                     else:
-                        alpha['ic'] = 0.0
+                        alphas_to_remove.append(i)
 
                 except Exception as e:
                     logger.warning(f"Failed to evaluate formula: {alpha['formula'][:50]}...")
-                    alpha['values'] = None
-                    alpha['ic'] = 0.0
+                    alphas_to_remove.append(i)
 
         # 2. 移除无效的alpha
-        self.alphas = [a for a in self.alphas if a.get('ic', 0) != 0]
+        for idx in reversed(alphas_to_remove):  # 反向删除避免索引错误
+            removed = self.alphas.pop(idx)
+            logger.info(f"Removed invalid alpha: {removed['formula'][:50]}...")
 
         # 3. 优化权重
         if len(self.alphas) > 0:
@@ -87,6 +170,8 @@ class AlphaPool:
             self.alphas = self.alphas[:self.pool_size]
 
         logger.info(f"Pool updated: {len(self.alphas)} valid alphas")
+        logger.info(
+            f"Statistics: {self.rejected_constant_count} constants rejected, {self.rejected_low_ic_count} low IC rejected")
 
     def maintain_pool(self, new_alpha, X_data, y_data):
         """
@@ -284,6 +369,23 @@ class AlphaPool:
         ics = [a.get('ic', 0) for a in self.alphas]
         weights = [a.get('weight', 0) for a in self.alphas]
 
+        # 计算alpha多样性
+        if len(self.alphas) > 1:
+            correlations = []
+            for i in range(len(self.alphas) - 1):
+                for j in range(i + 1, len(self.alphas)):
+                    if 'values' in self.alphas[i] and 'values' in self.alphas[j]:
+                        corr = self._calculate_mutual_ic(
+                            self.alphas[i]['values'],
+                            self.alphas[j]['values']
+                        )
+                        if not np.isnan(corr):
+                            correlations.append(abs(corr))
+
+            avg_correlation = np.mean(correlations) if correlations else 0
+        else:
+            avg_correlation = 0
+
         return {
             'pool_size': len(self.alphas),
             'avg_ic': np.mean(ics),
@@ -291,5 +393,8 @@ class AlphaPool:
             'min_ic': np.min(ics),
             'avg_weight': np.mean(weights),
             'max_weight': np.max(weights),
-            'min_weight': np.min(weights)
+            'min_weight': np.min(weights),
+            'avg_correlation': avg_correlation,  # 新增：平均相关性
+            'rejected_constants': self.rejected_constant_count,  # 新增：拒绝的常数
+            'rejected_low_ic': self.rejected_low_ic_count  # 新增：拒绝的低IC
         }

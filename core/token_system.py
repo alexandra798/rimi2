@@ -10,11 +10,12 @@ class TokenType(Enum):
 
 
 class Token:
-    def __init__(self, token_type, name, value=None, arity=0):
+    def __init__(self, token_type, name, value=None, arity=0, min_window=None):
         self.type = token_type
         self.name = name
         self.value = value
-        self.arity = arity  # 操作符需要的操作数个数
+        self.arity = arity
+        self.min_window = min_window  # 新增：最小窗口要求
 
 
 # Token定义字典
@@ -32,13 +33,14 @@ TOKEN_DEFINITIONS = {
     'vwap': Token(TokenType.OPERAND, 'vwap'),
 
     # 操作数 - 时间窗口（7个，用于时序操作）
-    'delta_1': Token(TokenType.OPERAND, 'delta_1', value=1),
+    'delta_3': Token(TokenType.OPERAND, 'delta_3', value=3),
     'delta_5': Token(TokenType.OPERAND, 'delta_5', value=5),
     'delta_10': Token(TokenType.OPERAND, 'delta_10', value=10),
     'delta_20': Token(TokenType.OPERAND, 'delta_20', value=20),
     'delta_30': Token(TokenType.OPERAND, 'delta_30', value=30),
     'delta_40': Token(TokenType.OPERAND, 'delta_40', value=40),
     'delta_50': Token(TokenType.OPERAND, 'delta_50', value=50),
+    'delta_60': Token(TokenType.OPERAND, 'delta_60', value=60),
 
     # 操作数 - 常数（13个，根据论文Table 3）
     'const_-30': Token(TokenType.OPERAND, 'const_-30', value=-30.0),
@@ -69,25 +71,24 @@ TOKEN_DEFINITIONS = {
     'greater': Token(TokenType.OPERATOR, 'greater', arity=2),
     'less': Token(TokenType.OPERATOR, 'less', arity=2),
 
-    # 时序操作符 - 特殊处理（实际使用时需要delta参数）
-    'ts_ref': Token(TokenType.OPERATOR, 'ts_ref', arity=1),  # Ref(x,t)
-    'ts_rank': Token(TokenType.OPERATOR, 'ts_rank', arity=1),  # Rank(x,t)
-    'ts_mean': Token(TokenType.OPERATOR, 'ts_mean', arity=1),  # Mean(x,t)
-    'ts_med': Token(TokenType.OPERATOR, 'ts_med', arity=1),  # Med(x,t)
-    'ts_sum': Token(TokenType.OPERATOR, 'ts_sum', arity=1),  # Sum(x,t)
-    'ts_std': Token(TokenType.OPERATOR, 'ts_std', arity=1),  # Std(x,t)
-    'ts_var': Token(TokenType.OPERATOR, 'ts_var', arity=1),  # Var(x,t)
-    'ts_max': Token(TokenType.OPERATOR, 'ts_max', arity=1),  # Max(x,t)
-    'ts_min': Token(TokenType.OPERATOR, 'ts_min', arity=1),  # Min(x,t)
-    'ts_skew': Token(TokenType.OPERATOR, 'ts_skew', arity=1),  # Skew(x,t)
-    'ts_kurt': Token(TokenType.OPERATOR, 'ts_kurt', arity=1),  # Kurt(x,t)
-    'ts_wma': Token(TokenType.OPERATOR, 'ts_wma', arity=1),  # WMA(x,t)
-    'ts_ema': Token(TokenType.OPERATOR, 'ts_ema', arity=1),  # EMA(x,t)
+    # 时序操作符 - 添加最小窗口要求
+    'ts_ref': Token(TokenType.OPERATOR, 'ts_ref', arity=1, min_window=1),
+    'ts_rank': Token(TokenType.OPERATOR, 'ts_rank', arity=1, min_window=2),
+    'ts_mean': Token(TokenType.OPERATOR, 'ts_mean', arity=1, min_window=1),
+    'ts_med': Token(TokenType.OPERATOR, 'ts_med', arity=1, min_window=1),
+    'ts_sum': Token(TokenType.OPERATOR, 'ts_sum', arity=1, min_window=1),
+    'ts_std': Token(TokenType.OPERATOR, 'ts_std', arity=1, min_window=3),  # 需要3个点！
+    'ts_var': Token(TokenType.OPERATOR, 'ts_var', arity=1, min_window=3),  # 需要3个点！
+    'ts_max': Token(TokenType.OPERATOR, 'ts_max', arity=1, min_window=1),
+    'ts_min': Token(TokenType.OPERATOR, 'ts_min', arity=1, min_window=1),
+    'ts_skew': Token(TokenType.OPERATOR, 'ts_skew', arity=1, min_window=5),  # 需要5个点！
+    'ts_kurt': Token(TokenType.OPERATOR, 'ts_kurt', arity=1, min_window=5),  # 需要5个点！
+    'ts_wma': Token(TokenType.OPERATOR, 'ts_wma', arity=1, min_window=2),
+    'ts_ema': Token(TokenType.OPERATOR, 'ts_ema', arity=1, min_window=2),
 
-
-    # 相关性操作符（需要3个操作数：2个数据，1个时间窗口）
-    'corr': Token(TokenType.OPERATOR, 'corr', arity=3),
-    'cov': Token(TokenType.OPERATOR, 'cov', arity=3),
+    # 相关性操作符
+    'corr': Token(TokenType.OPERATOR, 'corr', arity=3, min_window=3),
+    'cov': Token(TokenType.OPERATOR, 'cov', arity=3, min_window=3),
 }
 
 # 创建Token索引映射
@@ -149,34 +150,42 @@ class RPNValidator:
 
         last_token = token_sequence[-1] if token_sequence else None
 
-        # 如果最后一个是需要时间参数的操作符，下一个必须是delta
+        # 如果最后一个是需要时间参数的操作符
         time_ops = ['ts_ref', 'ts_rank', 'ts_mean', 'ts_med', 'ts_sum', 'ts_std',
                     'ts_var', 'ts_max', 'ts_min', 'ts_skew', 'ts_kurt',
                     'ts_wma', 'ts_ema']
+
         if last_token and last_token.name in time_ops:
-            return ['delta_1', 'delta_5', 'delta_10', 'delta_20',
-                    'delta_30', 'delta_40', 'delta_50']
+            # 只返回满足最小窗口要求的delta
+            valid_deltas = []
+            min_window = TOKEN_DEFINITIONS[last_token.name].min_window
+
+            for delta_name in ['delta_3', 'delta_5', 'delta_10', 'delta_20',
+                               'delta_30', 'delta_40', 'delta_50', 'delta_60']:
+                delta_value = TOKEN_DEFINITIONS[delta_name].value
+                if delta_value >= min_window:
+                    valid_deltas.append(delta_name)
+
+            return valid_deltas
 
         # 计算当前栈大小
         stack_size = RPNValidator.calculate_stack_size(token_sequence)
         valid_tokens = []
 
-        # 操作数总是可以添加（除非栈溢出）
+        # 操作数
         if stack_size < 10:
-            # 添加特征
             valid_tokens.extend(['open', 'high', 'low', 'close', 'volume', 'vwap'])
-            # 添加常数
             valid_tokens.extend(['const_-30', 'const_-10', 'const_-5', 'const_-2',
                                  'const_-1', 'const_-0.5', 'const_-0.01', 'const_0.5',
                                  'const_1', 'const_2', 'const_5', 'const_10', 'const_30'])
 
-        # 操作符需要足够的操作数
+        # 操作符
         for token_name, token in TOKEN_DEFINITIONS.items():
             if token.type == TokenType.OPERATOR:
                 if token.arity <= stack_size:
                     valid_tokens.append(token_name)
 
-        # END需要栈中恰好1个元素
+        # END
         if stack_size == 1 and len(token_sequence) > 3:
             valid_tokens.append('END')
 

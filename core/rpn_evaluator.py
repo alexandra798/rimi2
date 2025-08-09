@@ -52,10 +52,12 @@ class RPNEvaluator:
                     stack.append(data_dict[token.name])
                 elif token.name.startswith('const_'):
                     const_value = float(token.name.split('_')[1])
-                    if data_length and data_index is not None:
+                    # 始终创建 Series
+                    if data_index is not None:
                         stack.append(pd.Series(const_value, index=data_index))
                     elif data_length:
-                        stack.append(np.full(data_length, const_value))
+                        # 即使没有索引，也创建 Series
+                        stack.append(pd.Series([const_value] * data_length))
                     else:
                         stack.append(const_value)
                 elif token.name.startswith('delta_'):
@@ -197,12 +199,13 @@ class RPNEvaluator:
 
     @staticmethod
     def apply_unary_op(op_name, operand, data_length=None, data_index=None):
-        """应用一元操作符 - 确保返回向量"""
         if isinstance(operand, (int, float)) and data_length:
+            # 始终创建 Series 而不是 numpy 数组
             if data_index is not None:
                 operand = pd.Series(operand, index=data_index)
             else:
-                operand = np.full(data_length, operand)
+                operand = pd.Series([operand] * data_length)
+
 
         if op_name == 'abs':
             return np.abs(operand)
@@ -277,7 +280,7 @@ class RPNEvaluator:
 
     @staticmethod
     def apply_time_series_op(op_name, data, window):
-        """应用所有时序操作符（包括论文中的完整列表）"""
+        """应用所有时序操作符"""
         # 确保window是整数
         if isinstance(window, (pd.Series, np.ndarray)):
             window = int(window[0]) if len(window) > 0 else 5
@@ -286,193 +289,359 @@ class RPNEvaluator:
 
         window = max(1, min(window, 100))  # 限制窗口大小
 
+        # ================== Pandas Series 处理 ==================
         if isinstance(data, pd.Series):
-            if op_name == 'ts_ref':
-                # Ref(x,t): t天前的值
-                return data.shift(window)
+            return RPNEvaluator._apply_time_series_pandas(op_name, data, window)
 
-            elif op_name == 'ts_rank':
-                # Rank(x,t): 当前值在过去t天中的排名
-                return data.rolling(window=window, min_periods=1).apply(
-                    lambda x: stats.rankdata(x)[-1] / len(x)
-                )
+        # ================== NumPy Array 处理 ==================
+        else:
+            return RPNEvaluator._apply_time_series_numpy(op_name, data, window)
 
-            elif op_name == 'ts_mean':
-                # Mean(x,t): 过去t天的平均值
-                return data.rolling(window=window, min_periods=1).mean()
+    @staticmethod
+    def _apply_time_series_pandas(op_name, data, window):
+        """Pandas Series的时序操作实现"""
 
-            elif op_name == 'ts_med':
-                # Med(x,t): 过去t天的中位数
-                return data.rolling(window=window, min_periods=1).median()
+        if op_name == 'ts_ref':
+            return data.shift(window)
 
-            elif op_name == 'ts_sum':
-                # Sum(x,t): 过去t天的总和
-                return data.rolling(window=window, min_periods=1).sum()
+        elif op_name == 'ts_rank':
+            def rank_in_window(x):
+                if len(x) < 2:
+                    return 0.5
+                return (x.iloc[-1] > x).sum() / len(x)
 
-            elif op_name == 'ts_std':
-                # Std(x,t): 过去t天的标准差
-                # 关键修复：动态调整min_periods
-                min_periods_required = min(2, window)
-                if window < 2:
-                    # 窗口太小，返回0或NaN
-                    return pd.Series(0, index=data.index)
-                return data.rolling(window=window, min_periods=min_periods_required).std().fillna(0)
+            return data.rolling(window=window, min_periods=1).apply(rank_in_window, raw=False)
 
-            elif op_name == 'ts_var':
-                # Var(x,t): 过去t天的方差
-                # 关键修复：动态调整min_periods
-                min_periods_required = min(2, window)
-                if window < 2:
-                    # 窗口太小，返回0
-                    return pd.Series(0, index=data.index)
-                return data.rolling(window=window, min_periods=min_periods_required).var().fillna(0)
+        elif op_name == 'ts_mean':
+            return data.rolling(window=window, min_periods=1).mean()
 
-            elif op_name == 'ts_max':
-                # Max(x,t): 过去t天的最大值
-                return data.rolling(window=window, min_periods=1).max()
+        elif op_name == 'ts_med':
+            return data.rolling(window=window, min_periods=1).median()
 
-            elif op_name == 'ts_min':
-                # Min(x,t): 过去t天的最小值
-                return data.rolling(window=window, min_periods=1).min()
+        elif op_name == 'ts_sum':
+            return data.rolling(window=window, min_periods=1).sum()
 
-            elif op_name == 'ts_skew':
-                # Skew(x,t): 过去t天的偏度
-                # 关键修复：动态调整min_periods
-                min_periods_required = min(3, window)
-                if window < 3:
-                    # 窗口太小，返回0
-                    return pd.Series(0, index=data.index)
-                return data.rolling(window=window, min_periods=min_periods_required).skew().fillna(0)
-
-            elif op_name == 'ts_kurt':
-                # Kurt(x,t): 过去t天的峰度
-                # 关键修复：动态调整min_periods
-                min_periods_required = min(4, window)
-                if window < 4:
-                    # 窗口太小，返回0
-                    return pd.Series(0, index=data.index)
-                return data.rolling(window=window, min_periods=min_periods_required).kurt().fillna(0)
-
-            elif op_name == 'ts_wma':
-                # WMA(x,t): 加权移动平均（线性权重）
-                weights = np.arange(1, window + 1)
-                weights = weights / weights.sum()
-
-                def weighted_mean(x):
-                    if len(x) < window:
-                        w = weights[:len(x)]
-                        w = w / w.sum()
-                    else:
-                        w = weights
-                    return np.dot(x, w)
-
-                return data.rolling(window=window, min_periods=1).apply(weighted_mean)
-
-            elif op_name == 'ts_ema':
-                # EMA(x,t): 指数移动平均
-                return data.ewm(span=window, adjust=False, min_periods=1).mean()
-
+        elif op_name == 'ts_std' or op_name == 'ts_var':
+            if window < 3:
+                # 不返回常数，使用扩展差分作为波动性度量
+                diff = data.diff().abs()
+                result = diff.rolling(window=max(window, 2), min_periods=1).mean()
+                if op_name == 'ts_var':
+                    result = result ** 2
+                return result
             else:
-                raise ValueError(f"Unknown time series operator: {op_name}")
+                min_periods = min(3, window)
+                result = data.rolling(window=window, min_periods=min_periods).std()
+                if op_name == 'ts_var':
+                    result = result ** 2
+                return result.bfill().fillna(0)
+
+        elif op_name == 'ts_max':
+            return data.rolling(window=window, min_periods=1).max()
+
+        elif op_name == 'ts_min':
+            return data.rolling(window=window, min_periods=1).min()
+
+        elif op_name == 'ts_skew':
+            if window < 5:
+                # 简化的偏度估计
+                mean = data.rolling(window=max(window, 3), min_periods=1).mean()
+                deviation = data - mean
+                pos_dev = deviation.where(deviation > 0, 0)
+                neg_dev = deviation.where(deviation < 0, 0).abs()
+                skew_proxy = (pos_dev.rolling(window=max(window, 3), min_periods=1).sum() -
+                              neg_dev.rolling(window=max(window, 3), min_periods=1).sum())
+                return skew_proxy / (data.rolling(window=max(window, 3), min_periods=1).std() + 1e-8)
+            else:
+                min_periods = min(5, window)
+                return data.rolling(window=window, min_periods=min_periods).skew().fillna(0)
+
+        elif op_name == 'ts_kurt':
+            if window < 5:
+                # 简化的峰度估计
+                std = data.rolling(window=max(window, 3), min_periods=1).std()
+                mean = data.rolling(window=max(window, 3), min_periods=1).mean()
+                normalized = (data - mean) / (std + 1e-8)
+                kurt_proxy = (normalized.abs() > 2).rolling(window=max(window, 3), min_periods=1).mean()
+                return kurt_proxy * 10
+            else:
+                min_periods = min(5, window)
+                return data.rolling(window=window, min_periods=min_periods).kurt().fillna(0)
+
+        elif op_name == 'ts_wma':
+            weights = np.arange(1, window + 1)
+            weights = weights / weights.sum()
+
+            def weighted_mean(x):
+                if len(x) < window:
+                    w = weights[:len(x)]
+                    w = w / w.sum()
+                else:
+                    w = weights
+                return np.dot(x, w)
+
+            return data.rolling(window=window, min_periods=1).apply(weighted_mean)
+
+        elif op_name == 'ts_ema':
+            return data.ewm(span=window, adjust=False, min_periods=1).mean()
 
         else:
-            # NumPy数组处理（保持原有逻辑，但加入相同的修复）
-            result = np.zeros_like(data)
+            raise ValueError(f"Unknown time series operator: {op_name}")
 
-            for i in range(len(data)):
+    @staticmethod
+    def _apply_time_series_numpy(op_name, data, window):
+        """
+        NumPy Array的时序操作实现 - 完整版本
+        避免产生常数，使用智能替代方法
+        """
+
+        # 确保是numpy数组
+        if not isinstance(data, np.ndarray):
+            data = np.array(data)
+
+        # 初始化结果数组
+        result = np.zeros_like(data, dtype=np.float64)
+        data_len = len(data)
+
+        # ================== ts_ref: 引用t天前的值 ==================
+        if op_name == 'ts_ref':
+            result[:window] = np.nan  # 前window个值无法引用
+            if window < data_len:
+                result[window:] = data[:-window]
+            return result
+
+        # ================== ts_rank: 窗口内排名 ==================
+        elif op_name == 'ts_rank':
+            for i in range(data_len):
                 start_idx = max(0, i - window + 1)
                 window_data = data[start_idx:i + 1]
 
-                if op_name == 'ts_ref':
-                    if i >= window:
-                        result[i] = data[i - window]
-                    else:
-                        result[i] = np.nan
+                if len(window_data) < 2:
+                    result[i] = 0.5
+                else:
+                    # 计算当前值在窗口中的排名百分位
+                    current_val = data[i]
+                    rank = (current_val > window_data).sum() / len(window_data)
+                    result[i] = rank
+            return result
 
-                elif op_name == 'ts_rank':
-                    # 优化版本：避免使用lambda函数
-                    def rank_last(x):
-                        if len(x) == 0:
-                            return 0.5
+        # ================== ts_mean: 移动平均 ==================
+        elif op_name == 'ts_mean':
+            for i in range(data_len):
+                start_idx = max(0, i - window + 1)
+                window_data = data[start_idx:i + 1]
+                result[i] = np.mean(window_data)
+            return result
+
+        # ================== ts_med: 移动中位数 ==================
+        elif op_name == 'ts_med':
+            for i in range(data_len):
+                start_idx = max(0, i - window + 1)
+                window_data = data[start_idx:i + 1]
+                result[i] = np.median(window_data)
+            return result
+
+        # ================== ts_sum: 移动求和 ==================
+        elif op_name == 'ts_sum':
+            for i in range(data_len):
+                start_idx = max(0, i - window + 1)
+                window_data = data[start_idx:i + 1]
+                result[i] = np.sum(window_data)
+            return result
+
+        # ================== ts_std: 标准差（智能处理小窗口）==================
+        elif op_name == 'ts_std':
+            if window < 3:
+                # 小窗口：使用移动差分的绝对值作为波动性度量
+                diff = np.diff(data, prepend=data[0])
+                abs_diff = np.abs(diff)
+
+                for i in range(data_len):
+                    start_idx = max(0, i - max(window, 2) + 1)
+                    window_diff = abs_diff[start_idx:i + 1]
+                    result[i] = np.mean(window_diff) if len(window_diff) > 0 else 0
+            else:
+                # 正常窗口：计算标准差
+                for i in range(data_len):
+                    start_idx = max(0, i - window + 1)
+                    window_data = data[start_idx:i + 1]
+
+                    if len(window_data) >= 2:
+                        result[i] = np.std(window_data, ddof=1)  # 使用样本标准差
+                    else:
+                        # 单个数据点，使用与前一个值的差作为估计
+                        if i > 0:
+                            result[i] = abs(data[i] - data[i - 1]) / np.sqrt(2)
+                        else:
+                            result[i] = 0
+            return result
+
+        # ================== ts_var: 方差（智能处理小窗口）==================
+        elif op_name == 'ts_var':
+            if window < 3:
+                # 小窗口：使用差分方差估计
+                diff = np.diff(data, prepend=data[0])
+
+                for i in range(data_len):
+                    start_idx = max(0, i - max(window, 2) + 1)
+                    window_diff = diff[start_idx:i + 1]
+                    if len(window_diff) > 0:
+                        result[i] = np.var(window_diff)
+                    else:
+                        result[i] = 0
+            else:
+                # 正常窗口：计算方差
+                for i in range(data_len):
+                    start_idx = max(0, i - window + 1)
+                    window_data = data[start_idx:i + 1]
+
+                    if len(window_data) >= 2:
+                        result[i] = np.var(window_data, ddof=1)  # 使用样本方差
+                    else:
+                        if i > 0:
+                            result[i] = ((data[i] - data[i - 1]) / np.sqrt(2)) ** 2
+                        else:
+                            result[i] = 0
+            return result
+
+        # ================== ts_max: 移动最大值 ==================
+        elif op_name == 'ts_max':
+            for i in range(data_len):
+                start_idx = max(0, i - window + 1)
+                window_data = data[start_idx:i + 1]
+                result[i] = np.max(window_data)
+            return result
+
+        # ================== ts_min: 移动最小值 ==================
+        elif op_name == 'ts_min':
+            for i in range(data_len):
+                start_idx = max(0, i - window + 1)
+                window_data = data[start_idx:i + 1]
+                result[i] = np.min(window_data)
+            return result
+
+        # ================== ts_skew: 偏度（智能处理小窗口）==================
+        elif op_name == 'ts_skew':
+            for i in range(data_len):
+                if window < 5:
+                    # 小窗口：使用简化的偏度估计
+                    start_idx = max(0, i - max(window, 3) + 1)
+                    window_data = data[start_idx:i + 1]
+
+                    if len(window_data) >= 3:
+                        mean = np.mean(window_data)
+                        std = np.std(window_data)
+
+                        if std > 1e-8:
+                            deviation = window_data - mean
+                            # 计算正负偏离的不对称性
+                            pos_dev = np.sum(deviation[deviation > 0])
+                            neg_dev = np.sum(np.abs(deviation[deviation < 0]))
+
+                            if pos_dev + neg_dev > 0:
+                                skew_proxy = (pos_dev - neg_dev) / (pos_dev + neg_dev)
+                                result[i] = skew_proxy * 3  # 缩放到合理范围
+                            else:
+                                result[i] = 0
+                        else:
+                            result[i] = 0
+                    else:
+                        result[i] = 0
+                else:
+                    # 正常窗口：计算标准偏度
+                    start_idx = max(0, i - window + 1)
+                    window_data = data[start_idx:i + 1]
+
+                    if len(window_data) >= 3:
                         try:
-                            # 使用更高效的方式计算排名
-                            return (x.iloc[-1] > x).sum() / len(x)
+                            result[i] = stats.skew(window_data)
+                            if np.isnan(result[i]):
+                                result[i] = 0
                         except:
-                            return 0.5
-
-                    # 对于大数据集，考虑分块处理
-                    if len(data) > 10000:
-                        # 分块处理避免内存溢出
-                        chunk_size = 5000
-                        results = []
-                        for i in range(0, len(data), chunk_size):
-                            chunk = data.iloc[i:min(i + chunk_size, len(data))]
-                            result = chunk.rolling(window=window, min_periods=1).apply(
-                                rank_last, raw=False
-                            )
-                            results.append(result)
-                        return pd.concat(results)
-                    else:
-                        return data.rolling(window=window, min_periods=1).apply(
-                            rank_last, raw=False
-                        )
-
-                elif op_name == 'ts_mean':
-                    result[i] = np.mean(window_data)
-
-                elif op_name == 'ts_med':
-                    result[i] = np.median(window_data)
-
-                elif op_name == 'ts_sum':
-                    result[i] = np.sum(window_data)
-
-                elif op_name == 'ts_std':
-                    # 修复：检查窗口大小
-                    if len(window_data) > 1 and window >= 2:
-                        result[i] = np.std(window_data)
+                            result[i] = 0
                     else:
                         result[i] = 0
+            return result
 
-                elif op_name == 'ts_var':
-                    # 修复：检查窗口大小
-                    if len(window_data) > 1 and window >= 2:
-                        result[i] = np.var(window_data)
+        # ================== ts_kurt: 峰度（智能处理小窗口）==================
+        elif op_name == 'ts_kurt':
+            for i in range(data_len):
+                if window < 5:
+                    # 小窗口：使用简化的峰度估计
+                    start_idx = max(0, i - max(window, 3) + 1)
+                    window_data = data[start_idx:i + 1]
+
+                    if len(window_data) >= 3:
+                        mean = np.mean(window_data)
+                        std = np.std(window_data)
+
+                        if std > 1e-8:
+                            normalized = (window_data - mean) / std
+                            # 计算极端值的比例作为峰度代理
+                            extreme_ratio = np.sum(np.abs(normalized) > 2) / len(normalized)
+                            result[i] = extreme_ratio * 10  # 缩放
+                        else:
+                            result[i] = 0
                     else:
                         result[i] = 0
+                else:
+                    # 正常窗口：计算标准峰度
+                    start_idx = max(0, i - window + 1)
+                    window_data = data[start_idx:i + 1]
 
-                elif op_name == 'ts_max':
-                    result[i] = np.max(window_data)
-
-                elif op_name == 'ts_min':
-                    result[i] = np.min(window_data)
-
-                elif op_name == 'ts_skew':
-                    # 修复：检查窗口大小
-                    if len(window_data) >= 3 and window >= 3:
-                        result[i] = stats.skew(window_data)
+                    if len(window_data) >= 4:
+                        try:
+                            result[i] = stats.kurtosis(window_data, fisher=True)
+                            if np.isnan(result[i]):
+                                result[i] = 0
+                        except:
+                            result[i] = 0
                     else:
                         result[i] = 0
+            return result
 
-                elif op_name == 'ts_kurt':
-                    # 修复：检查窗口大小
-                    if len(window_data) >= 4 and window >= 4:
-                        result[i] = stats.kurtosis(window_data)
+        # ================== ts_wma: 加权移动平均 ==================
+        elif op_name == 'ts_wma':
+            # 创建线性权重
+            full_weights = np.arange(1, window + 1, dtype=np.float64)
+            full_weights = full_weights / full_weights.sum()
+
+            for i in range(data_len):
+                start_idx = max(0, i - window + 1)
+                window_data = data[start_idx:i + 1]
+                window_len = len(window_data)
+
+                if window_len > 0:
+                    # 调整权重以匹配窗口大小
+                    if window_len < window:
+                        weights = np.arange(1, window_len + 1, dtype=np.float64)
+                        weights = weights / weights.sum()
                     else:
-                        result[i] = 0
+                        weights = full_weights
 
-                elif op_name == 'ts_wma':
-                    weights = np.arange(1, len(window_data) + 1)
-                    weights = weights / weights.sum()
                     result[i] = np.dot(window_data, weights)
+                else:
+                    result[i] = data[i]
+            return result
 
-                elif op_name == 'ts_ema':
-                    alpha = 2.0 / (window + 1)
-                    if i == 0:
-                        result[i] = data[i]
-                    else:
-                        result[i] = alpha * data[i] + (1 - alpha) * result[i - 1]
+        # ================== ts_ema: 指数移动平均 ==================
+        elif op_name == 'ts_ema':
+            alpha = 2.0 / (window + 1)
+
+            # 初始化第一个值
+            result[0] = data[0]
+
+            # 递归计算EMA
+            for i in range(1, data_len):
+                result[i] = alpha * data[i] + (1 - alpha) * result[i - 1]
 
             return result
+
+        else:
+            raise ValueError(f"Unknown time series operator: {op_name}")
+
+
+
 
     @staticmethod
     def apply_ternary_op(op_name, operand1, operand2, operand3):

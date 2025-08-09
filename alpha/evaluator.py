@@ -131,33 +131,33 @@ class FormulaEvaluator:
             return []
 
     def _prepare_data(self, data: Union[pd.DataFrame, Dict]) -> Optional[Dict]:
-        """
-        准备数据为字典格式
-
-        Args:
-            data: 输入数据
-
-        Returns:
-            数据字典，失败返回None
-        """
+        """准备数据为字典格式 - 确保都是 Series"""
         try:
             if isinstance(data, pd.DataFrame):
-                # DataFrame转字典，使用Series格式保留索引信息
+                # DataFrame转字典，使用Series格式
                 return data.to_dict('series')
             elif isinstance(data, dict):
-                # 确保字典值都是Series或数组
                 prepared = {}
+                # 获取一个参考索引
+                ref_index = None
+                for value in data.values():
+                    if isinstance(value, pd.Series):
+                        ref_index = value.index
+                        break
+
                 for key, value in data.items():
-                    if isinstance(value, (pd.Series, np.ndarray)):
+                    if isinstance(value, pd.Series):
                         prepared[key] = value
+                    elif isinstance(value, np.ndarray):
+                        # 转换为 Series
+                        prepared[key] = pd.Series(value, index=ref_index)
                     else:
-                        # 尝试转换为数组
-                        prepared[key] = np.array(value)
+                        # 转换为 Series
+                        prepared[key] = pd.Series(value, index=ref_index)
                 return prepared
             else:
                 logger.error(f"Unsupported data type: {type(data)}")
                 return None
-
         except Exception as e:
             logger.error(f"Data preparation error: {e}")
             return None

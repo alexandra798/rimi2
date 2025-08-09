@@ -211,8 +211,9 @@ class RiskMinerTrainer:
         return state.token_sequence
 
     def update_alpha_pool(self, trajectories, iteration):
-        """更新Alpha池"""
+        """更新Alpha池 - 增强版，过滤常数"""
         new_formulas = []
+        constant_count = 0
 
         for trajectory in trajectories:
             if not trajectory:
@@ -225,32 +226,52 @@ class RiskMinerTrainer:
 
             # 检查是否以END结束
             if final_state.token_sequence[-1].name == 'END':
-                # 评估公式
                 formula_rpn = ' '.join([t.name for t in final_state.token_sequence])
                 alpha_values = self.formula_evaluator.evaluate(formula_rpn, self.X_data)
 
                 if alpha_values is not None and not alpha_values.isna().all():
-                    ic = self.reward_calculator.calculate_ic(alpha_values, self.y_data)
+                    # 新增：检查是否为常数
+                    if hasattr(alpha_values, 'values'):
+                        values = alpha_values.values
+                    else:
+                        values = np.array(alpha_values)
 
-                    # 添加到池中
-                    new_formulas.append({
-                        'formula': formula_rpn,
-                        'ic': ic,
-                        'values': alpha_values,
-                        'iteration': iteration
-                    })
+                    valid_values = values[~np.isnan(values)]
+                    if len(valid_values) > 10:  # 足够的有效值
+                        std = np.std(valid_values)
+
+                        if std < 1e-6:  # 常数检测
+                            constant_count += 1
+                            logger.debug(f"Skipping constant formula: {formula_rpn[:50]}...")
+                            continue
+
+                        # 计算IC
+                        ic = self.reward_calculator.calculate_ic(alpha_values, self.y_data)
+
+                        # 只添加IC足够高的公式
+                        if abs(ic) >= 0.01:
+                            new_formulas.append({
+                                'formula': formula_rpn,
+                                'ic': ic,
+                                'values': alpha_values,
+                                'iteration': iteration
+                            })
 
         # 添加新公式到池中
         for formula_info in new_formulas:
             exists = any(a['formula'] == formula_info['formula'] for a in self.alpha_pool)
             if not exists:
                 self.alpha_pool.append(formula_info)
-                logger.info(f"New formula added: {formula_info['formula'][:50]}... IC={formula_info['ic']:.4f}")
+                logger.info(f"New valid formula: {formula_info['formula'][:50]}... IC={formula_info['ic']:.4f}")
 
         # 保持池大小
         if len(self.alpha_pool) > 100:
-            self.alpha_pool.sort(key=lambda x: x['ic'], reverse=True)
+            # 移除IC最低的
+            self.alpha_pool.sort(key=lambda x: abs(x['ic']), reverse=True)
             self.alpha_pool = self.alpha_pool[:100]
+
+        if constant_count > 0:
+            logger.info(f"Filtered out {constant_count} constant formulas in iteration {iteration}")
 
     def print_statistics(self):
         """打印训练统计信息"""

@@ -48,8 +48,6 @@ class MDPState:
 
         return encoding
 
-
-
     def copy(self):
         """深拷贝状态"""
         new_state = MDPState()
@@ -94,6 +92,43 @@ class AlphaMiningMDP:
         valid_actions = RPNValidator.get_valid_next_tokens(self.current_state.token_sequence)
         return action_token in valid_actions
 
-    def get_valid_actions(self):
-        """获取当前状态的合法动作"""
-        return RPNValidator.get_valid_next_tokens(self.current_state.token_sequence)
+    def get_valid_actions(self, state):
+        """获取当前状态的合法动作 过滤会产生常数的组合"""
+        base_actions = RPNValidator.get_valid_next_tokens(state.token_sequence)
+
+        # 过滤掉会产生常数的动作组合
+        filtered_actions = []
+
+        for action in base_actions:
+            # 检查是否为时序操作符后跟过小的窗口
+            if len(state.token_sequence) > 0:
+                last_token = state.token_sequence[-1]
+
+                # 如果上一个是时序操作符，检查窗口大小
+
+                if last_token.name in ['ts_skew'] and action == 'delta_3':
+                    continue  # 跳过
+
+                if last_token.name in ['ts_kurt'] and action == 'delta_3':
+                    continue  # 跳过
+
+                # 检查常数运算
+                # 如果栈顶是常数，避免某些操作
+                if self.is_stack_top_constant(state):
+                    if action in ['ts_std', 'ts_var', 'ts_skew', 'ts_kurt']:
+                        continue  # 常数的统计量还是常数
+
+            filtered_actions.append(action)
+
+        return filtered_actions if filtered_actions else ['END']
+
+    def is_stack_top_constant(self, state):
+        """检查栈顶是否为常数"""
+        # 简化实现：检查最近的操作数是否为常数
+        for token in reversed(state.token_sequence):
+            if token.type == TokenType.OPERAND:
+                return token.name.startswith('const_')
+            if token.type == TokenType.OPERATOR:
+                break
+        return False
+

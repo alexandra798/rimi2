@@ -14,19 +14,40 @@ class RewardCalculator:
     - 终止奖励: Reward_end = 合成alpha的IC
     """
 
-    def __init__(self, alpha_pool, lambda_param=0.1, sample_size=5000,pool_size=100):
+    def __init__(self, alpha_pool, lambda_param=0.1, sample_size=5000,
+                 pool_size=100, min_std=1e-6):
         self.alpha_pool = alpha_pool
         self.lambda_param = lambda_param
-        self.sample_size = sample_size  # 采样大小
+        self.sample_size = sample_size
         self.pool_size = pool_size
+        self.min_std = min_std  # 新增：最小标准差阈值
         self.formula_evaluator = FormulaEvaluator()
-        self._cache = {}  # 添加缓存
+        self._cache = {}
+
+        # 新增：统计信息
+        self.constant_penalty_count = 0
+
+    def is_nearly_constant(self, values):
+        """检查值是否接近常数"""
+        if values is None:
+            return True
+
+        if hasattr(values, 'values'):
+            values = values.values
+        values = np.array(values).flatten()
+
+        valid_values = values[~np.isnan(values)]
+        if len(valid_values) < 2:
+            return True
+
+        std = np.std(valid_values)
+        return std < self.min_std
+
 
     def calculate_ic(self, predictions, targets):
         return self._calculate_ic(predictions, targets)
 
     def calculate_intermediate_reward(self, state, X_data, y_data):
-        # 生成缓存键
         cache_key = ' '.join([t.name for t in state.token_sequence])
         if cache_key in self._cache:
             return self._cache[cache_key]
@@ -36,7 +57,7 @@ class RewardCalculator:
             return -0.1
 
         try:
-            # 采样数据以加速计算
+            # 采样数据
             if len(X_data) > self.sample_size:
                 sample_indices = np.random.choice(len(X_data), self.sample_size, replace=False)
                 X_sample = X_data.iloc[sample_indices] if hasattr(X_data, 'iloc') else X_data[sample_indices]
@@ -51,31 +72,50 @@ class RewardCalculator:
             if alpha_values is None:
                 result = -0.1
             else:
-                # 计算IC
-                ic = self._calculate_ic(alpha_values, y_sample)
-
-                # 计算mutIC（也用采样数据）
-                if len(self.alpha_pool) > 0:
-                    mut_ic_sum = 0
-                    valid_count = 0
-                    for alpha in self.alpha_pool[:10]:  # 只比较前10个alpha
-                        if 'values' in alpha:
-                            # 重新评估alpha在采样数据上的值
-                            alpha_sample_values = self.formula_evaluator.evaluate(
-                                alpha['formula'], X_sample
-                            )
-                            mut_ic = self._calculate_mutual_ic(alpha_values, alpha_sample_values)
-                            if not np.isnan(mut_ic):
-                                mut_ic_sum += abs(mut_ic)
-                                valid_count += 1
-
-                    if valid_count > 0:
-                        avg_mut_ic = mut_ic_sum / valid_count
-                        result = ic - self.lambda_param * avg_mut_ic
-                    else:
-                        result = ic
+                # 新增：检查是否为常数
+                if self.is_nearly_constant(alpha_values):
+                    self.constant_penalty_count += 1
+                    logger.debug(f"Constant alpha detected in intermediate state: {cache_key[:50]}...")
+                    result = -1.0  # 严厉惩罚常数因子
                 else:
-                    result = ic
+                    # 计算IC
+                    ic = self._calculate_ic(alpha_values, y_sample)
+
+                    # 额外奖励高变异性的因子
+                    if hasattr(alpha_values, 'values'):
+                        values = alpha_values.values
+                    else:
+                        values = np.array(alpha_values)
+
+                    valid_values = values[~np.isnan(values)]
+                    if len(valid_values) > 0:
+                        std = np.std(valid_values)
+                        # 变异性奖励（对数尺度）
+                        diversity_bonus = np.log(1 + std) * 0.1
+                    else:
+                        diversity_bonus = 0
+
+                    # 计算mutIC
+                    if len(self.alpha_pool) > 0:
+                        mut_ic_sum = 0
+                        valid_count = 0
+                        for alpha in self.alpha_pool[:10]:
+                            if 'values' in alpha:
+                                alpha_sample_values = self.formula_evaluator.evaluate(
+                                    alpha['formula'], X_sample
+                                )
+                                mut_ic = self._calculate_mutual_ic(alpha_values, alpha_sample_values)
+                                if not np.isnan(mut_ic):
+                                    mut_ic_sum += abs(mut_ic)
+                                    valid_count += 1
+
+                        if valid_count > 0:
+                            avg_mut_ic = mut_ic_sum / valid_count
+                            result = ic - self.lambda_param * avg_mut_ic + diversity_bonus
+                        else:
+                            result = ic + diversity_bonus
+                    else:
+                        result = ic + diversity_bonus
 
             # 缓存结果
             self._cache[cache_key] = result
@@ -92,7 +132,6 @@ class RewardCalculator:
             return -1.0
 
         try:
-            # 使用统一的评估器
             formula_str = ' '.join([t.name for t in state.token_sequence])
             alpha_values = self.formula_evaluator.evaluate(
                 formula_str,
@@ -100,37 +139,43 @@ class RewardCalculator:
                 allow_partial=False
             )
 
-            if alpha_values is None or alpha_values.isna().all():
-                return -0.5
+            # 新增：严格检查常数
+            if alpha_values is None or alpha_values.isna().all() or self.is_nearly_constant(alpha_values):
+                logger.debug(f"Terminal state produces constant alpha: {formula_str[:50]}...")
+                return -2.0  # 更严厉的惩罚
 
             # 计算个体IC
             individual_ic = self._calculate_ic(alpha_values, y_data)
 
+            # 新增：IC太低则惩罚
+            if abs(individual_ic) < 0.01:
+                logger.debug(f"Terminal state has very low IC: {individual_ic:.4f}")
+                return -0.5
+
             readable_formula = ' '.join([t.name for t in state.token_sequence])
 
-            # 添加到池中
-            new_alpha = {
-                'formula': readable_formula,
-                'values': alpha_values,
-                'ic': individual_ic,
-                'weight': 1.0
-            }
+            # 只添加高质量的alpha到池中
+            if abs(individual_ic) >= 0.01 and not self.is_nearly_constant(alpha_values):
+                new_alpha = {
+                    'formula': readable_formula,
+                    'values': alpha_values,
+                    'ic': individual_ic,
+                    'weight': 1.0
+                }
 
-            # 检查是否已存在
-            exists = any(a.get('formula') == readable_formula for a in self.alpha_pool)
-            if not exists:
-                self.alpha_pool.append(new_alpha)
+                exists = any(a.get('formula') == readable_formula for a in self.alpha_pool)
+                if not exists:
+                    self.alpha_pool.append(new_alpha)
 
-                # 维护池大小 - 使用self.pool_size
-                if len(self.alpha_pool) > self.pool_size:
-                    self.alpha_pool.sort(key=lambda x: abs(x.get('ic', 0)), reverse=True)
-                    self.alpha_pool = self.alpha_pool[:self.pool_size]
+                    if len(self.alpha_pool) > self.pool_size:
+                        self.alpha_pool.sort(key=lambda x: abs(x.get('ic', 0)), reverse=True)
+                        self.alpha_pool = self.alpha_pool[:self.pool_size]
 
-                    # 计算合成IC
+                    logger.info(f"High quality terminal alpha: {readable_formula[:50]}...")
+                    logger.info(f"  IC={individual_ic:.4f}")
+
+            # 计算合成IC
             composite_ic = self._calculate_composite_ic(y_data)
-
-            logger.info(f"Terminal: formula={readable_formula[:50]}...")
-            logger.info(f"  individual_IC={individual_ic:.4f}, composite_IC={composite_ic:.4f}")
 
             return composite_ic
 
@@ -172,8 +217,17 @@ class RewardCalculator:
             if valid_mask.sum() < 2:
                 return 0.0
 
+            # 检查是否为常数
+            if np.std(predictions[valid_mask]) < 1e-10:
+                logger.debug("Predictions are nearly constant")
+                return 0.0
+            if np.std(targets[valid_mask]) < 1e-10:
+                logger.debug("Targets are nearly constant")
+                return 0.0
+
             corr, _ = pearsonr(predictions[valid_mask], targets[valid_mask])
             return corr if not np.isnan(corr) else 0.0
+
 
         except Exception as e:
             logger.error(f"Error calculating IC: {e}")
