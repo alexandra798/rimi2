@@ -120,7 +120,32 @@ class AlphaMiningMDP:
 
             filtered_actions.append(action)
 
-        return filtered_actions if filtered_actions else ['END']
+        # 多样性与确定性约束：限制连续操作数、限制重复操作数
+        actions = filtered_actions
+
+        # 限制连续操作数（最近连续≥2个操作数时，只允许操作符或 END）
+        consecutive_operands = 0
+        for tok in reversed(state.token_sequence):
+            if tok.type == TokenType.OPERAND and tok.name != 'BEG':
+                consecutive_operands += 1
+            else:
+                break
+        if consecutive_operands >= 2:
+            actions = [a for a in actions
+                       if (a == 'END') or (TOKEN_DEFINITIONS[a].type == TokenType.OPERATOR)]
+
+        # 限制同一操作数在最近窗口的高频重复（近5步≥3次则临时禁用）
+        recent_names = [t.name for t in state.token_sequence[-5:]]
+        counts = {}
+        for name in recent_names:
+            counts[name] = counts.get(name, 0) + 1
+        actions = [a for a in actions
+                   if not (TOKEN_DEFINITIONS[a].type == TokenType.OPERAND and counts.get(a, 0) >= 3)]
+
+        # 兜底
+        if not actions:
+            return ['END']
+        return actions
 
     def is_stack_top_constant(self, state):
         """检查栈顶是否为常数"""

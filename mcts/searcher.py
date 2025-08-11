@@ -71,12 +71,22 @@ class MCTSSearcher:
             # 选择一个新扩展的子节点进行评估
             if current.children:
                 # 根据先验概率选择
+
                 probs = [child.P for child in current.children.values()]
-                probs = np.array(probs) / np.sum(probs)
+                probs = np.array(probs, dtype=np.float64)
+                probs = np.where(np.isfinite(probs) & (probs >= 0.0), probs, 0.0)
+                s = probs.sum()
+                if (not np.isfinite(s)) or s <= 0.0:
+                    probs = np.full(len(probs), 1.0 / len(probs))
+                else:
+                    probs = probs / s
+
                 selected_idx = np.random.choice(len(current.children), p=probs)
+
                 selected_action = list(current.children.keys())[selected_idx]
                 current = current.children[selected_action]
                 path.append(current)
+
 
         # 阶段3：Rollout
         if current.is_terminal():
@@ -106,7 +116,7 @@ class MCTSSearcher:
             return 0
 
         # 获取所有合法动作
-        valid_actions = RPNValidator.get_valid_next_tokens(node.state.token_sequence)
+        valid_actions = mdp_env.get_valid_actions(node.state)
 
         if not valid_actions:
             return 0
@@ -143,7 +153,7 @@ class MCTSSearcher:
 
         while depth < max_depth and not current_state.token_sequence[-1].name == 'END':
             # 获取合法动作
-            valid_actions = RPNValidator.get_valid_next_tokens(current_state.token_sequence)
+            valid_actions = mdp_env.get_valid_actions(current_state)
 
             if not valid_actions:
                 break
@@ -151,9 +161,17 @@ class MCTSSearcher:
             # 使用策略网络选择动作（如果有）
             if self.policy_network:
                 action_probs, _ = self.get_policy_predictions(current_state, valid_actions)
-                probs = [action_probs.get(a, 1.0 / len(valid_actions)) for a in valid_actions]
-                probs = np.array(probs) / np.sum(probs)
+
+                probs = [action_probs.get(a, 0.0) for a in valid_actions]
+                probs = np.array(probs, dtype=np.float64)
+                probs = np.where(np.isfinite(probs) & (probs >= 0.0), probs, 0.0)
+                s = probs.sum()
+                if (not np.isfinite(s)) or s <= 0.0:
+                    probs = np.full(len(valid_actions), 1.0 / len(valid_actions))
+                else:
+                    probs = probs / s
                 action = np.random.choice(valid_actions, p=probs)
+
             else:
                 # 随机选择
                 action = np.random.choice(valid_actions)
@@ -263,19 +281,30 @@ class MCTSSearcher:
             valid_actions_mask[TOKEN_TO_INDEX[action]] = True
         valid_actions_mask = valid_actions_mask.unsqueeze(0).to(self.device)
 
-        # 前向传播
         with torch.no_grad():
             action_probs, value = self.policy_network(state_encoding, valid_actions_mask)
 
-        # 转换为字典
+        # 转换并清洗为概率字典（非负、有限、和为1；否则均匀分布）
         probs = {}
+        raw = []
         for action in valid_actions:
             idx = TOKEN_TO_INDEX[action]
-            probs[action] = action_probs[0, idx].item()
+            p = float(action_probs[0, idx].item())
+            if not (np.isfinite(p) and p >= 0.0):
+                p = 0.0
+            raw.append(p)
 
-        return probs, value.item()
+        raw = np.array(raw, dtype=np.float64)
+        s = raw.sum()
+        if (not np.isfinite(s)) or s <= 0.0:
+            raw = np.full_like(raw, 1.0 / len(raw))
+        else:
+            raw = raw / s
 
+        for action, p in zip(valid_actions, raw):
+            probs[action] = float(p)
 
+        return probs, float(value.item())
 
     def get_best_action(self, root_node, temperature=1.0):
         """
@@ -298,12 +327,17 @@ class MCTSSearcher:
             best_idx = np.argmax(visits)
             return actions[best_idx]
         else:
-            # 根据访问次数分布采样
-            visits = np.array(visits)
+            visits = np.array(visits, dtype=np.float64)
             if temperature != 1.0:
-                visits = visits ** (1 / temperature)
-            probs = visits / visits.sum()
+                visits = visits ** (1.0 / temperature)
+            visits = np.where(np.isfinite(visits) & (visits >= 0.0), visits, 0.0)
+            s = visits.sum()
+            if (not np.isfinite(s)) or s <= 0.0:
+                probs = np.full(len(actions), 1.0 / len(actions))
+            else:
+                probs = visits / s
             return np.random.choice(actions, p=probs)
+
 
 
 

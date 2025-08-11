@@ -2,6 +2,7 @@
 import pandas as pd
 import numpy as np
 from scipy.stats import spearmanr
+from utils.metrics import calculate_sharpe_ratio, calculate_max_drawdown
 import logging
 
 
@@ -63,62 +64,107 @@ def backtest_with_trading_simulation(formulas, X_test, y_test, price_data,
     """
     evaluator = FormulaEvaluator()
 
-    # 获取时间索引（假设数据有date列）
-    dates = X_test.index.get_level_values('date').unique() if isinstance(X_test.index,
-                                                                         pd.MultiIndex) else X_test.index.unique()
-    dates = sorted(dates)
+    # 获取时间索引（稳健支持 MultiIndex 或列字段）
+    if isinstance(X_test.index, pd.MultiIndex) and {'date', 'ticker'}.issubset(set(X_test.index.names)):
+        dates = X_test.index.get_level_values('date').unique().sort_values()
+
+        def get_daily_data(df, d):
+            return df.xs(d, level='date', drop_level=False)
+
+        def tickers_of(df_day):
+            return df_day.index.get_level_values('ticker').unique()
+
+        def slice_ticker(df_day, t):
+            return df_day.xs(t, level='ticker', drop_level=False)
+    else:
+        if 'date' not in X_test.columns or 'ticker' not in X_test.columns:
+            raise ValueError("X_test 必须是 MultiIndex(date,ticker) 或含有 'date' 与 'ticker' 列")
+        dates = pd.Index(sorted(X_test['date'].unique()))
+
+        def get_daily_data(df, d):
+            return df[df['date'] == d]
+
+        def tickers_of(df_day):
+            return pd.Index(df_day['ticker'].unique())
+
+        def slice_ticker(df_day, t):
+            return df_day[df_day['ticker'] == t]
 
     portfolio_values = [initial_capital]
     holdings = {}  # 当前持仓
+
+    def get_close(price_df, d, t):
+        # 稳健取 close，兼容 MultiIndex 或列字段
+        if isinstance(price_df.index, pd.MultiIndex) and {'date', 'ticker'}.issubset(set(price_df.index.names)):
+            return float(price_df.loc[(d, t), 'close'])
+        elif {'date', 'ticker', 'close'}.issubset(set(price_df.columns)):
+            row = price_df[(price_df['date'] == d) & (price_df['ticker'] == t)]
+            if len(row):
+                return float(row['close'].iloc[0])
+            raise KeyError(f"Missing price for {d} {t}")
+        else:
+            raise ValueError("price_data 需为 MultiIndex(date,ticker) 或包含 date/ticker/close 列")
 
     for i, date in enumerate(dates):
         # 每rebalance_freq天重新平衡
         if i % rebalance_freq == 0:
             # 计算所有股票的alpha信号
-            daily_data = X_test.loc[X_test.index.get_level_values('date') == date]
+            daily_data = get_daily_data(X_test, date)
 
             alpha_scores = {}
-            for ticker in daily_data.index.get_level_values('ticker'):
-                ticker_data = daily_data.loc[daily_data.index.get_level_values('ticker') == ticker]
+            for ticker in tickers_of(daily_data):
+                ticker_data = slice_ticker(daily_data, ticker)
 
                 # 使用所有公式的平均信号
                 scores = []
                 for formula in formulas:
                     score = evaluator.evaluate(formula, ticker_data)
                     if not pd.isna(score).all():
-                        scores.append(score.values[0] if hasattr(score, 'values') else score)
+                        score = (score.dropna().iloc[-1] if hasattr(score, 'dropna') else score)
+                        scores.append(float(score))
 
                 if scores:
                     alpha_scores[ticker] = np.mean(scores)
 
             # 选择top-k股票
-            if alpha_scores:
-                sorted_tickers = sorted(alpha_scores.items(), key=lambda x: x[1], reverse=True)
-                selected_tickers = [t[0] for t in sorted_tickers[:top_k]]
+            if not alpha_scores:
+                portfolio_values.append(portfolio_values[-1])  # 无信号，持仓不变
+                continue
 
-                # 计算每只股票的投资金额（等权重）
-                current_value = portfolio_values[-1]
-                position_size = current_value / len(selected_tickers)
+            sorted_tickers = sorted(alpha_scores.items(), key=lambda x: x[1], reverse=True)
+            selected_tickers = [t[0] for t in sorted_tickers[:top_k]]
 
-                # 更新持仓
-                new_holdings = {}
-                for ticker in selected_tickers:
+            if len(selected_tickers) == 0:
+                portfolio_values.append(portfolio_values[-1])
+                continue
+
+            # 计算每只股票的投资金额（等权重）
+            current_value = portfolio_values[-1]
+            position_size = current_value / len(selected_tickers)
+
+            # 更新持仓
+            new_holdings = {}
+            for ticker in selected_tickers:
+                try:
                     # 获取当前价格
-                    current_price = price_data.loc[(date, ticker), 'close']
+                    current_price = get_close(price_data, date, ticker)
                     shares = position_size / current_price
                     new_holdings[ticker] = shares
+                except Exception as e:
+                    logger.warning(f"Price missing for {ticker} @ {date}: {e}")
+                    # 跳过无法获取价格的股票
 
-                holdings = new_holdings
+            holdings = new_holdings
 
         # 计算当日组合价值
         daily_value = 0
         for ticker, shares in holdings.items():
             try:
-                current_price = price_data.loc[(date, ticker), 'close']
+                current_price = get_close(price_data, date, ticker)#
                 daily_value += shares * current_price
-            except:
-                # 股票可能停牌或退市
-                pass
+            except Exception as e:
+                logger.warning(f"Price missing @ {date} {ticker}: {e}")
+                daily_value = portfolio_values[-1]  # 保持前一日价值
 
         if daily_value == 0:
             daily_value = portfolio_values[-1]  # 保持前一日价值
@@ -126,18 +172,14 @@ def backtest_with_trading_simulation(formulas, X_test, y_test, price_data,
         portfolio_values.append(daily_value)
 
     # 计算性能指标
-    portfolio_returns = np.diff(portfolio_values) / portfolio_values[:-1]
+    portfolio_returns = np.diff(portfolio_values) / np.asarray(portfolio_values[:-1], dtype=float)
 
-    # 累积收益率（论文公式）
+    # 累积收益率
     cumulative_return = (portfolio_values[-1] / portfolio_values[0]) - 1
 
-    # 计算夏普比率
-    sharpe_ratio = np.sqrt(252) * np.mean(portfolio_returns) / np.std(portfolio_returns)
-
-    # 最大回撤
-    running_max = np.maximum.accumulate(portfolio_values)
-    drawdown = (portfolio_values - running_max) / running_max
-    max_drawdown = np.min(drawdown)
+    # 使用统一的指标函数
+    sharpe_ratio = calculate_sharpe_ratio(portfolio_returns, risk_free_rate=0.0, periods=252)
+    max_drawdown = calculate_max_drawdown(np.asarray(portfolio_values, dtype=float))
 
     results = {
         'cumulative_return': cumulative_return,

@@ -5,40 +5,33 @@ from scipy.stats import spearmanr, pearsonr
 
 
 def calculate_ic(predictions, targets, method='pearman'):
-    """
-    计算信息系数(IC)
-    Args:
-        predictions: 预测值
-        targets: 真实值
-    Returns:
-        IC值
-    """
-
-    # 处理输入
-    if hasattr(predictions, 'values'):
-        predictions = predictions.values
-    if hasattr(targets, 'values'):
-        targets = targets.values
-
-    predictions = np.array(predictions).flatten()
-    targets = np.array(targets).flatten()
-
-    # 对齐长度
-    min_len = min(len(predictions), len(targets))
-    predictions = predictions[:min_len]
-    targets = targets[:min_len]
-
-    # 移除NaN
-    valid_mask = ~(np.isnan(predictions) | np.isnan(targets))
-    if valid_mask.sum() < 2:
-        return 0.0
-
-    # 计算Pearson相关（论文使用）
-    if method == 'pearson':
-        corr, _ = pearsonr(predictions[valid_mask], targets[valid_mask])
+    """计算信息系数(IC)；优先对齐索引，其次回退到长度截断。常数/NaN返回0.0。"""
+    import warnings
+    from scipy.stats import ConstantInputWarning, spearmanr, pearsonr
+    # 索引安全对齐（两者都是 Series 时）
+    if isinstance(predictions, pd.Series) and isinstance(targets, pd.Series):
+        df = pd.concat([predictions, targets], axis=1, join='inner').dropna()
+        if df.shape[0] < 2:
+            return 0.0
+        x = df.iloc[:, 0].values
+        y = df.iloc[:, 1].values
     else:
-        corr, _ = spearmanr(predictions[valid_mask], targets[valid_mask])
-
+        # 原逻辑：拉平 + 截断 + 去 NaN
+        if hasattr(predictions, 'values'):
+            predictions = predictions.values
+        if hasattr(targets, 'values'):
+            targets = targets.values
+        x = np.array(predictions).flatten()
+        y = np.array(targets).flatten()
+        m = min(len(x), len(y));
+        x, y = x[:m], y[:m]
+        valid = ~(np.isnan(x) | np.isnan(y))
+        if valid.sum() < 2:
+            return 0.0
+        x, y = x[valid], y[valid]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=ConstantInputWarning)
+        corr, _ = (pearsonr(x, y) if method == 'pearson' else spearmanr(x, y))
     return corr if not np.isnan(corr) else 0.0
 
 
@@ -60,7 +53,7 @@ def calculate_sharpe_ratio(returns, risk_free_rate=0.0, periods=252):
         return 0.0
 
     mean_excess_return = np.mean(excess_returns)
-    std_excess_return = np.std(excess_returns)
+    std_excess_return = np.std(excess_returns, ddof=1)
 
     if std_excess_return == 0:
         return 0.0
@@ -71,20 +64,12 @@ def calculate_sharpe_ratio(returns, risk_free_rate=0.0, periods=252):
 
 
 def calculate_max_drawdown(cumulative_returns):
-    """
-    计算最大回撤
-
-    Args:
-        cumulative_returns: 累计收益率序列
-
-    Returns:
-        最大回撤
-    """
-    running_max = np.maximum.accumulate(cumulative_returns)
-    drawdown = (cumulative_returns - running_max) / running_max
-    max_drawdown = np.min(drawdown)
-
-    return abs(max_drawdown)
+    """最大回撤，分母做零保护。"""
+    cr = np.asarray(cumulative_returns, dtype=float)
+    running_max = np.maximum.accumulate(cr)
+    running_max = np.where(running_max == 0.0, 1e-12, running_max)
+    drawdown = (cr - running_max) / running_max
+    return float(abs(np.min(drawdown)))
 
 
 def calculate_icir(ic_series):

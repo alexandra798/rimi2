@@ -1,7 +1,6 @@
 """RPN表达式求值器"""
 import numpy as np
 import pandas as pd
-from scipy.stats import rankdata
 from scipy import stats
 import logging
 from core.token_system import TokenType, TOKEN_DEFINITIONS
@@ -16,8 +15,7 @@ class RPNEvaluator:
     @staticmethod
     def evaluate(token_sequence, data_dict, allow_partial=True):
         """
-        评估RPN表达式 - 修正版支持部分表达式
-
+        评估RPN表达式 支持部分表达式
         Args:
             token_sequence: Token序列
             data_dict: 数据字典
@@ -79,19 +77,37 @@ class RPNEvaluator:
                         delta_token = token_sequence[i + 1]
                         window = int(delta_token.name.split('_')[1])
                         i += 2  # 跳到delta后面
-
-                        # 应用时序操作
-                        result = RPNEvaluator.apply_time_series_op(
-                            token.name, data_operand, window
-                        )
-                        stack.append(result)
-                        continue  # 重要：跳过主循环的 i += 1
                     else:
-                        # 没有delta，使用默认窗口
-                        result = RPNEvaluator.apply_time_series_op(
-                            token.name, data_operand, window
-                        )
-                        stack.append(result)
+                        i += 1
+                    result = RPNEvaluator.apply_time_series_op(
+                        token.name, data_operand, window
+                    )
+                    stack.append(result)
+                    continue  # 跳过主循环的 i += 1
+
+
+
+                elif token.name in ('corr', 'cov'):
+
+                    if len(stack) < 2:
+                        logger.error(f"Insufficient operands for {token.name}")
+                        return None
+
+                    y = stack.pop()
+                    x = stack.pop()
+
+                    window = 5  # 默认窗口
+                    if i + 1 < len(token_sequence) and token_sequence[i + 1].name.startswith('delta_'):
+                        delta_token = token_sequence[i + 1]
+                        window = int(delta_token.name.split('_')[1])
+                        i += 2  # 跳过操作符后的 delta_*
+                    else:
+                        i += 1  # 没有 delta_*，使用默认窗口，并前进一个 token
+
+                    # 直接把窗口当作第三参传给三元实现（第三参现在是 int）
+                    result = RPNEvaluator.apply_ternary_op(token.name, x, y, window)
+                    stack.append(result)
+                    continue  # 已手动推进 i
 
                 elif token.arity == 1:
                     # 一元操作符
@@ -216,8 +232,11 @@ class RPNEvaluator:
             else:
                 return np.log(np.maximum(np.abs(operand) + 1e-10, 1e-10))
         elif op_name == 'sign':
-            # Sign: 返回1如果为正，否则返回0（按照论文）
-            return np.where(operand > 0, 1.0, 0.0)
+            # 如果是 Series，保留索引；按论文定义：正数=1，非正=0
+            if isinstance(operand, pd.Series):
+                return (operand > 0).astype(float)
+            else:
+                return np.where(operand > 0, 1.0, 0.0)
         elif op_name == 'csrank':
             # 横截面排名
             return RPNEvaluator.apply_cross_section_op('csrank', operand)
@@ -554,13 +573,16 @@ class RPNEvaluator:
 
                     if len(window_data) >= 3:
                         try:
-                            result[i] = stats.skew(window_data)
-                            if np.isnan(result[i]):
+                            if np.std(window_data) < 1e-10:
                                 result[i] = 0
-                        except:
+                            else:
+                                val = stats.skew(window_data)
+                                result[i] = 0 if (not np.isfinite(val)) else val
+                        except Exception:
                             result[i] = 0
                     else:
                         result[i] = 0
+
             return result
 
         # ================== ts_kurt: 峰度（智能处理小窗口）==================
@@ -591,13 +613,16 @@ class RPNEvaluator:
 
                     if len(window_data) >= 4:
                         try:
-                            result[i] = stats.kurtosis(window_data, fisher=True)
-                            if np.isnan(result[i]):
+                            if np.std(window_data) < 1e-10:
                                 result[i] = 0
-                        except:
+                            else:
+                                val = stats.kurtosis(window_data, fisher=True)
+                                result[i] = 0 if (not np.isfinite(val)) else val
+                        except Exception:
                             result[i] = 0
                     else:
                         result[i] = 0
+
             return result
 
         # ================== ts_wma: 加权移动平均 ==================
@@ -642,13 +667,12 @@ class RPNEvaluator:
 
 
 
-
     @staticmethod
     def apply_ternary_op(op_name, operand1, operand2, operand3):
         """应用三元操作符"""
         if op_name == 'corr':
             # 相关性：operand1和operand2的相关性，窗口大小为operand3
-            window = int(operand3) if isinstance(operand3, (int, float)) else int(operand3[0])
+            window = int(operand3)
             window = max(2, min(window, 100))
 
             if isinstance(operand1, pd.Series) and isinstance(operand2, pd.Series):
@@ -665,7 +689,7 @@ class RPNEvaluator:
 
         elif op_name == 'cov':
             # 协方差
-            window = int(operand3) if isinstance(operand3, (int, float)) else int(operand3[0])
+            window = int(operand3)
             window = max(2, min(window, 100))
 
             if isinstance(operand1, pd.Series) and isinstance(operand2, pd.Series):

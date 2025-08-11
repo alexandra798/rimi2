@@ -5,7 +5,7 @@ import numpy as np
 import sys
 import os
 
-from core import TOKEN_TO_INDEX
+from core import TOKEN_TO_INDEX, RPNValidator
 
 
 class RiskSeekingOptimizer:
@@ -70,15 +70,29 @@ class RiskSeekingOptimizer:
                 returns.insert(0, G)
             returns_tensor = torch.FloatTensor(returns).to(self.device)
 
+            masks = []
+            lengths = []
+            for state, action, reward in episode_trajectory:
+                valid = [False] * len(TOKEN_TO_INDEX)
+                for name in RPNValidator.get_valid_next_tokens(state.token_sequence):
+                    valid[TOKEN_TO_INDEX[name]] = True
+                masks.append(valid)
+                # 真实长度：token_sequence 长度（不超过 encode 的最大步长）
+                lengths.append(min(len(state.token_sequence), states_tensor.size(1)))
+
+            masks_tensor = torch.BoolTensor(masks).to(self.device)
+            lengths_tensor = torch.LongTensor(lengths).to(self.device)
+
             # 前向传播
-            action_probs, values = self.policy_network(states_tensor)
+            action_probs, values = self.policy_network(states_tensor, valid_actions_mask=masks_tensor,
+                                                       lengths=lengths_tensor)
 
             # 计算策略损失（REINFORCE with baseline）
             log_probs = torch.log(action_probs.gather(1, actions_tensor.unsqueeze(1)))
             advantages = returns_tensor - values.squeeze()
             policy_loss = -(log_probs.squeeze() * advantages.detach()).mean()
 
-            # 计算价值损失
+            # 修改终点 计算价值损失
             value_loss = F.mse_loss(values.squeeze(), returns_tensor)
 
             # 总损失

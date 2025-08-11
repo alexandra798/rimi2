@@ -259,6 +259,13 @@ class AlphaPool:
         X_clean = X[valid_mask]
         y_clean = y[valid_mask]
 
+        # === 新增：列标准化，防止数值爆炸 ===
+        col_mean = X_clean.mean(axis=0)
+        col_std = X_clean.std(axis=0)
+        eps = 1e-8
+        col_std_safe = np.where(col_std < eps, 1.0, col_std)  # 防 0
+        X_clean = (X_clean - col_mean) / col_std_safe
+
         # 初始化权重
         weights = np.array([self.alphas[i].get('weight', 1.0 / len(valid_indices))
                             for i in valid_indices])

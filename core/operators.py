@@ -1,8 +1,6 @@
 """所有操作符的集中实现"""
 import numpy as np
 import pandas as pd
-from scipy.stats import rankdata, skew, kurtosis
-from scipy import stats
 import logging
 
 logger = logging.getLogger(__name__)
@@ -54,8 +52,12 @@ class Operators:
 
     @staticmethod
     def log(x):
-        """Log operator: 自然对数"""
-        return np.where(x > 0, np.log(x), np.nan)
+        """Log operator: 与 RPNEvaluator 保持一致的安全 log：log(max(|x|+1e-10, 1e-10))"""
+        if isinstance(x, pd.Series):
+            return np.log(np.maximum(x.abs() + 1e-10, 1e-10))
+        else:
+            x = np.asarray(x)
+            return np.log(np.maximum(np.abs(x) + 1e-10, 1e-10))
 
     # 比较操作符
     @staticmethod

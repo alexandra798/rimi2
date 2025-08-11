@@ -1,6 +1,8 @@
-"""主程序入口 - 支持Token系统和传统系统"""
+"""主程序入口 - 支持Token系统和传统系统（改进版）"""
 import argparse
 import logging
+import numpy as np
+import pandas as pd
 import os
 import torch
 from sklearn.model_selection import train_test_split
@@ -12,15 +14,15 @@ from data.data_loader import (
     load_user_dataset,
     check_missing_values,
     handle_missing_values,
-    apply_alphas_and_return_transformed
+    apply_alphas_and_return_transformed,
+    clean_target_zeros,
+    validate_data_quality
 )
 from alpha.pool import AlphaPool
 from alpha.evaluator import FormulaEvaluator
 from validation.cross_validation import cross_validate_formulas
 from validation.backtest import backtest_formulas
 from mcts.trainer import RiskMinerTrainer
-
-
 
 # 设置日志
 logging.basicConfig(
@@ -29,6 +31,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 warnings.filterwarnings('ignore', category=ConstantInputWarning)
+
+def _preprocess_for_mcts(X: pd.DataFrame) -> pd.DataFrame:
+    """对每列做 log1p + z-score；仅用于 MCTS/AlphaPool 的输入，不改动原始 X"""
+    Xp = X.copy()
+    # 保险起见：若存在极少数负值（数据清洗瑕疵），先截到 0
+    numeric_cols = Xp.select_dtypes(include=[np.number]).columns
+    Xp[numeric_cols] = np.clip(Xp[numeric_cols], a_min=0, a_max=None)
+    # log1p
+    Xp[numeric_cols] = np.log1p(Xp[numeric_cols])
+    # z-score（按列）
+    mean = Xp[numeric_cols].mean(axis=0)
+    std = Xp[numeric_cols].std(axis=0)
+    std_safe = std.replace(0, 1.0)  # 防 0
+    Xp[numeric_cols] = (Xp[numeric_cols] - mean) / std_safe
+    return Xp
+
 
 def run_mcts_with_token_system(X_train, y_train, num_iterations=200,
                                use_policy_network=True, num_simulations=50,
@@ -49,7 +67,6 @@ def run_mcts_with_token_system(X_train, y_train, num_iterations=200,
     """
     logger.info("Starting MCTS with Token System")
     logger.info(f"Data size: {len(X_train)} rows")
-
 
     # 创建训练器
     trainer = RiskMinerTrainer(X_train, y_train, device=device, use_sampling=True)
@@ -78,6 +95,7 @@ def run_mcts_with_token_system(X_train, y_train, num_iterations=200,
 
     return result
 
+
 def main(args):
     """主函数"""
     logger.info("Starting RiMi Algorithm")
@@ -95,8 +113,6 @@ def main(args):
         logger.info(f"GPU Memory: {torch.cuda.get_device_properties(device).total_memory / 1024 ** 3:.2f} GB")
         torch.cuda.set_device(device)
         torch.cuda.empty_cache()
-
-
     else:
         device = torch.device("cpu")
         logger.info("Using CPU")
@@ -105,29 +121,58 @@ def main(args):
 
     # 第1部分：数据准备和探索
     logger.info("=== Part 1: Data Preparation & Exploration ===")
-    X, y, all_features = load_user_dataset(args.data_path, args.target_column)
-    check_missing_values(X, 'user_dataset')
 
-    # 处理缺失值
-    logger.info("Handling missing values in the dataset...")
-    X = handle_missing_values(X, strategy='forward_fill', fill_value=0)
-    logger.info(f"Missing values handled. Final dataset shape: {X.shape}")
+    # 加载原始数据
+    X, y, all_features = load_user_dataset(args.data_path, args.target_column)
+    logger.info(f"Initial data shape: X={X.shape}, y={y.shape}")
+
+    # 检查初始缺失值
+    check_missing_values(X, 'initial')
+
+    # 步骤1：清理target=0的样本（区分停牌和正常交易）
+    logger.info("Step 1: Cleaning target=0 samples (removing suspensions)...")
+    X, y = clean_target_zeros(X, y)
+
+    # 步骤2：处理缺失值（使用混合策略）
+    logger.info("Step 2: Handling missing values with mixed strategy...")
+    X = handle_missing_values(X, strategy='mixed')
+
+    # 步骤3：再次检查并确保没有缺失值
+    check_missing_values(X, 'after_handling')
+
+    # 步骤4：验证数据质量
+    logger.info("Step 3: Validating data quality...")
+    is_valid, issues = validate_data_quality(X, y)
+
+    if not is_valid:
+        logger.error("Data quality validation failed! Issues found:")
+        for issue in issues:
+            logger.error(f"  - {issue}")
+        if not args.force_continue:
+            raise ValueError("Data quality check failed. Use --force_continue to proceed anyway.")
+        else:
+            logger.warning("Continuing despite data quality issues (--force_continue flag set)")
+
+    logger.info(f"Final clean dataset shape: X={X.shape}, y={y.shape}")
+    logger.info(f"Target distribution: mean={y.mean():.4f}, std={y.std():.4f}")
+    logger.info(f"Samples with target=0: {(y == 0).sum()} ({(y == 0).sum() / len(y) * 100:.2f}%)")
 
     # 划分训练集和测试集
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, shuffle=False
     )
+    # === 新增：仅供 MCTS/AlphaPool 使用的去量纲版本 ===
+    X_train_mcts = _preprocess_for_mcts(X_train)
+
     logger.info(f"Train shape: {X_train.shape}, Test shape: {X_test.shape}")
 
     # 第2-4部分：MCTS和Alpha池管理
     logger.info("=== Parts 2-4: MCTS & Alpha Pool Management ===")
 
-    # 根据系统选择初始化不同的组件（才怪，锁定用新的）
-
     if args.use_risk_seeking:
         logger.info("Using Token system with Risk Seeking Policy Network")
         best_formulas_quantile = run_mcts_with_token_system(
-            X_train, y_train,
+            X_train_mcts, y_train,
             num_iterations=MCTS_CONFIG['num_iterations'],
             num_simulations=50,
             device=device
@@ -144,25 +189,22 @@ def main(args):
         lambda_param=ALPHA_POOL_CONFIG['lambda_param']
     )
 
-    # 修复2：使用正确的方法添加公式到池中
-    if best_formulas_quantile:  # 检查是否为空
+    # 添加公式到池中
+    if best_formulas_quantile:
         for formula, score in best_formulas_quantile:
-            #  使用add_to_pool方法（现在存在了）
             alpha_pool.add_to_pool({
                 'formula': formula,
                 'score': score,
-                'ic': score  # 添加ic字段
+                'ic': score
             })
 
-        #  使用update_pool方法（现在存在了）
-        alpha_pool.update_pool(X_train, y_train, evaluate_formula)
+        alpha_pool.update_pool(X_train_mcts, y_train, evaluate_formula)  # <-- 用预处理后的 X
 
-    #  使用get_top_formulas方法（现在存在了）
+
     top_formulas = alpha_pool.get_top_formulas(5)
 
     if not top_formulas:
         logger.warning("No formulas found in alpha pool, using default formulas")
-        # 提供一些默认公式作为后备
         top_formulas = [
             "BEG close END",
             "BEG volume END",
@@ -303,7 +345,11 @@ if __name__ == "__main__":
         default=0,
         help="GPU device ID to use (default: 0)"
     )
-
+    parser.add_argument(
+        "--force_continue",
+        action="store_true",
+        help="Force continue even if data quality check fails"
+    )
 
     args = parser.parse_args()
     main(args)

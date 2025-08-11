@@ -84,40 +84,63 @@ class MCTSNode:
         if not self.children:
             return None
 
-            # 使用传入的c_puct或节点默认值
         c = c_puct if c_puct is not None else self.c_puct
 
         # 计算母节点总访问次数
         total_visits = sum(child.N for child in self.children.values())
 
-        # 特殊情况：首次访问，选择先验概率最高的
+        #新：首次访问，优先选择 P 有效且最大的；否则随机一个
         if total_visits == 0:
-            return max(self.children.values(), key=lambda child: child.P)
+            valid_children = [ch for ch in self.children.values()
+                              if np.isfinite(ch.P) and ch.P > 0.0]
+            if not valid_children:
+                import random
+                return random.choice(list(self.children.values()))
+            return max(valid_children, key=lambda ch: ch.P)
 
-        # 计算sqrt(total_visits)用于所有子节点
+        # 旧：特殊情况：首次访问，选择先验概率最高的
+        # if total_visits == 0:
+            # return max(self.children.values(), key=lambda child: child.P)
+
         sqrt_total = math.sqrt(total_visits)
 
         best_value = -float('inf')
         best_child = None
 
-        for action, child in self.children.items():
-            # Q值：平均奖励（exploitation）
+        for child in self.children.values():
+            # Q 容错
             q_value = child.Q
+            if not np.isfinite(q_value):
+                q_value = 0.0
 
-            # U值：探索奖励（exploration）
-            # P(s,a) * sqrt(parent_visits) / (1 + child_visits)
-            u_value = c * child.P * sqrt_total / (1.0 + child.N)
+            # P 容错
+            p_value = child.P
+            if not (np.isfinite(p_value) and p_value > 0.0):
+                p_value = 1.0 / len(self.children)
 
-            # PUCT值
+            u_value = c * p_value * sqrt_total / (1.0 + child.N)
             puct_value = q_value + u_value
 
             if puct_value > best_value:
                 best_value = puct_value
                 best_child = child
 
+        #for action, child in self.children.items():
+            # Q值：平均奖励（exploitation）
+            #q_value = child.Q
+
+            # U值：探索奖励（exploration）
+            # P(s,a) * sqrt(parent_visits) / (1 + child_visits)
+            #u_value = c * child.P * sqrt_total / (1.0 + child.N)
+
+            # PUCT值
+            #puct_value = q_value + u_value
+
+            #if puct_value > best_value:
+                #best_value = puct_value
+                #best_child = child
+
         return best_child
-
-
 
 
     def get_visit_distribution(self):

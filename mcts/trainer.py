@@ -11,7 +11,7 @@ from mcts.reward_calculator import RewardCalculator
 from mcts.node import MCTSNode
 from mcts.searcher import MCTSSearcher
 from mcts.environment import AlphaMiningMDP, MDPState
-from core import TOKEN_DEFINITIONS, RPNEvaluator
+
 
 from policy.network import PolicyNetwork
 from policy.optimizer import RiskSeekingOptimizer
@@ -192,8 +192,13 @@ class RiskMinerTrainer:
             depth += 1
 
         if not current.is_terminal() and depth < max_depth:
-            # 强制终止
-            trajectory.append((current.state, 'END', reward))
+            # 强制终止：补齐 END 并显式计算终止奖励
+            terminal_state = current.state.copy()
+            terminal_state.add_token('END')
+            terminal_reward = self.reward_calculator.calculate_terminal_reward(
+                terminal_state, self.X_data, self.y_data
+            )
+            trajectory.append((current.state, 'END', terminal_reward))
 
         return trajectory
 

@@ -120,15 +120,17 @@ class RPNValidator:
                 if not token.name.startswith('delta_'):
                     stack_size += 1
             elif token.type == TokenType.OPERATOR:
-                # 检查是否需要delta参数
-                if token.name in ['ts_ref', 'ts_rank'] or token.name.startswith('ts_'):
+                needs_delta = (token.name in ['ts_ref', 'ts_rank'] or token.name.startswith('ts_')
+                               or token.name in ['corr', 'cov'])
+                if needs_delta:
                     # 这些操作符需要delta参数
                     if i + 1 < len(token_sequence) and token_sequence[i + 1].name.startswith('delta_'):
-                        i += 1  # 跳过delta
-                    # 栈操作：消耗arity个，产生1个
-                    if stack_size < token.arity:
-                        return False
-                    stack_size = stack_size - token.arity + 1
+                        i += 1  # 跳过 delta
+                    # 有效 arity：corr/cov 视为 2
+                    eff_arity = 2 if token.name in ['corr', 'cov'] else token.arity
+                    if stack_size < eff_arity:
+                            return False
+                    stack_size = stack_size - eff_arity + 1
                 else:
                     # 普通操作符
                     if stack_size < token.arity:
@@ -153,7 +155,7 @@ class RPNValidator:
         # 如果最后一个是需要时间参数的操作符
         time_ops = ['ts_ref', 'ts_rank', 'ts_mean', 'ts_med', 'ts_sum', 'ts_std',
                     'ts_var', 'ts_max', 'ts_min', 'ts_skew', 'ts_kurt',
-                    'ts_wma', 'ts_ema']
+                    'ts_wma', 'ts_ema', 'corr', 'cov']
 
         if last_token and last_token.name in time_ops:
             # 只返回满足最小窗口要求的delta
@@ -182,8 +184,10 @@ class RPNValidator:
         # 操作符
         for token_name, token in TOKEN_DEFINITIONS.items():
             if token.type == TokenType.OPERATOR:
-                if token.arity <= stack_size:
+                required = 2 if token_name in ('corr', 'cov') else token.arity
+                if required <= stack_size:
                     valid_tokens.append(token_name)
+
 
         # END
         if stack_size == 1 and len(token_sequence) > 3:
@@ -210,14 +214,17 @@ class RPNValidator:
             elif token.type == TokenType.OPERATOR:
                 # 检查是否有delta参数
                 time_ops = ['ts_ref', 'ts_rank'] + [f'ts_{op}' for op in
-                                              ['mean', 'med', 'sum', 'std', 'var', 'max', 'min',
-                                               'skew', 'kurt', 'wma', 'ema']]
-                if token.name in time_ops:
+                                                    ['mean', 'med', 'sum', 'std', 'var', 'max', 'min', 'skew', 'kurt',
+                                                     'wma', 'ema']]
+                needs_delta = token.name in time_ops or token.name in ['corr', 'cov']
+                if needs_delta:
                     if i + 1 < len(token_sequence) and token_sequence[i + 1].name.startswith('delta_'):
-                        i += 1  # 跳过delta
+                        i += 1
+                    eff_arity = 2 if token.name in ['corr', 'cov'] else token.arity
+                    stack_size = stack_size - eff_arity + 1
 
-                # 更新栈大小
-                stack_size = stack_size - token.arity + 1
+                else:
+                    stack_size = stack_size - token.arity + 1
 
             i += 1
 
@@ -247,11 +254,11 @@ class FormulaGenerator:
         return token
 
     def update_stack_count(self, token):
-        """更新栈计数"""
-        if token.type == TokenType.OPERAND:
+        if token.type == TokenType.OPERATOR:
+            eff_arity = 2 if token.name in ('corr', 'cov') else token.arity
+            self.operand_stack_count = self.operand_stack_count - eff_arity + 1
+        else:
             self.operand_stack_count += 1
-        elif token.type == TokenType.OPERATOR:
-            self.operand_stack_count = self.operand_stack_count - token.arity + 1
 
     def can_terminate(self):
         """检查是否可以结束（栈中正好剩1个操作数）"""
@@ -261,7 +268,3 @@ class FormulaGenerator:
         """获取当前状态下的合法动作"""
         return RPNValidator.get_valid_next_tokens(self.token_sequence)
 
-    def to_formula_string(self):
-        """将Token序列转换为可读的公式字符串"""
-        # 简化版本：直接返回token名称序列
-        return ' '.join([t.name for t in self.token_sequence[1:] if t.name != 'END'])

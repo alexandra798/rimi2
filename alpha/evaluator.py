@@ -1,4 +1,3 @@
-"""统一的Alpha公式评估器 - 重构版"""
 import pandas as pd
 import numpy as np
 import logging
@@ -7,13 +6,12 @@ from contextlib import contextmanager
 from functools import lru_cache
 from typing import Union, Dict, Optional, Any
 
-from core import RPNEvaluator, RPNValidator, TOKEN_DEFINITIONS, TokenType, Operators
+from core import RPNEvaluator, RPNValidator, TOKEN_DEFINITIONS, Operators
 
 logger = logging.getLogger(__name__)
 
 
 class FormulaEvaluator:
-    """统一的RPN公式评估器 - 所有公式都作为RPN处理"""
 
     def __init__(self):
 
@@ -24,19 +22,13 @@ class FormulaEvaluator:
     def evaluate(self, formula: str, data: Union[pd.DataFrame, Dict],
                  allow_partial: bool = False) -> pd.Series:
         """
-        统一的评估接口 - 所有公式都作为RPN处理
-
         Args:
             formula: RPN公式字符串
             data: 数据（DataFrame或字典）
             allow_partial: 是否允许部分表达式
-            use_cache: 是否使用缓存
-
         Returns:
             评估结果的Series，失败时返回NaN Series
         """
-        # 生成缓存键
-
         cache_key = self._generate_cache_key(formula, data, allow_partial)
         if cache_key in self._result_cache:
             logger.debug(f"Cache hit for formula: {formula[:50]}...")
@@ -60,7 +52,6 @@ class FormulaEvaluator:
 
     def _evaluate_impl(self, formula: str, data: Union[pd.DataFrame, Dict],
                        allow_partial: bool) -> pd.Series:
-        """实际的评估实现"""
         # 解析Token序列
         token_sequence = self._parse_tokens(formula)
         if not token_sequence:
@@ -90,20 +81,17 @@ class FormulaEvaluator:
             return self._convert_to_series(result, data)
 
         except Exception as e:
-            logger.error(f"RPN evaluation failed: {str(e)}")
+            logger.error(f"RPN evaluation failed: {type(e).__name__}: {str(e)}")
+            logger.debug(f"Token sequence: {' '.join([t.name for t in token_sequence])}")
             return self._create_nan_series(data)
 
     def _parse_tokens(self, formula: str) -> list:
-        """
-        解析公式字符串为Token序列
-        Args:
-            formula: RPN公式字符串
-        Returns:
-            Token序列列表，解析失败返回空列表
-        """
         try:
             token_names = formula.strip().split()
             token_sequence = []
+            # 自动添加 BEG 如果缺失
+            if not token_names or token_names[0] != 'BEG':
+                token_sequence.append(TOKEN_DEFINITIONS['BEG'])
 
             for name in token_names:
                 if name in TOKEN_DEFINITIONS:
@@ -124,6 +112,10 @@ class FormulaEvaluator:
                         logger.warning(f"Unknown token: {name}")
                         return []
 
+            # 自动添加 END 如果缺失且表达式可终止
+            if token_sequence and token_sequence[-1].name != 'END':
+                if RPNValidator.can_terminate(token_sequence):
+                    token_sequence.append(TOKEN_DEFINITIONS['END'])
             return token_sequence
 
         except Exception as e:
@@ -165,13 +157,6 @@ class FormulaEvaluator:
     def _convert_to_series(self, result: Any, original_data: Union[pd.DataFrame, Dict]) -> pd.Series:
         """
         将评估结果转换为Series
-
-        Args:
-            result: 评估结果
-            original_data: 原始数据（用于获取索引）
-
-        Returns:
-            结果Series
         """
         try:
             # 如果已经是Series，直接返回
@@ -222,7 +207,7 @@ class FormulaEvaluator:
         return pd.Series(np.nan)
 
     def _is_complete_expression(self, token_sequence: list) -> bool:
-        """检查是否为完整的RPN表达式"""
+
         if not token_sequence:
             return False
 
@@ -230,16 +215,13 @@ class FormulaEvaluator:
         if token_sequence[0].name != 'BEG':
             return False
 
-        # 可以以END结束（完整）或不以END结束（部分）
-        has_end = token_sequence[-1].name == 'END' if len(token_sequence) > 1 else False
+        # 完整表达式必须以END结束
+        if len(token_sequence) <= 1 or token_sequence[-1].name != 'END':
+            return False  # 没有END就不是完整表达式
 
         # 验证栈平衡
         stack_size = RPNValidator.calculate_stack_size(token_sequence)
-
-        if has_end:
-            return stack_size == 1  # 完整表达式应该留下1个结果
-        else:
-            return stack_size >= 1  # 部分表达式至少有1个元素
+        return stack_size == 1  # 完整表达式应该正好留下1个结果
 
     def _generate_cache_key(self, formula: str, data: Any, allow_partial: bool) -> str:
         """生成缓存键"""
@@ -249,14 +231,7 @@ class FormulaEvaluator:
 
     def evaluate_state(self, state, X_data) -> Optional[np.ndarray]:
         """
-        评估状态对应的公式值
-
-        Args:
-            state: MDPState对象
-            X_data: 数据
-
-        Returns:
-            评估结果的数组，失败返回None
+            return：评估结果的数组，失败返回None
         """
         try:
             # 构建RPN字符串

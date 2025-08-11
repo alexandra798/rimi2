@@ -3,12 +3,12 @@ import numpy as np
 from sklearn.model_selection import TimeSeriesSplit
 from scipy.stats import spearmanr
 import logging
-from alpha import FormulaEvaluator
+from alpha.evaluator import FormulaEvaluator
 
 logger = logging.getLogger(__name__)
 
 
-def evaluate_formula_cross_val(formula, X, y, n_splits):
+def evaluate_formula_cross_val(formula, X, y, n_splits, evaluate_formula_func=None):
     """
     使用交叉验证评估公式
 
@@ -22,7 +22,9 @@ def evaluate_formula_cross_val(formula, X, y, n_splits):
     Returns:
     - ic_scores: 每折的IC分数列表
     """
-    evaluator = FormulaEvaluator()
+    evaluator = FormulaEvaluator() if evaluate_formula_func is None else None
+    eval_fn = evaluator.evaluate if evaluate_formula_func is None else evaluate_formula_func
+
     tscv = TimeSeriesSplit(n_splits=n_splits)
     ic_scores = []
 
@@ -33,7 +35,7 @@ def evaluate_formula_cross_val(formula, X, y, n_splits):
         y_train_fold, y_test_fold = y.iloc[train_index], y.iloc[test_index]
 
         # 评估测试折上的公式
-        feature_test = evaluator.evaluate(formula, X_test_fold)
+        feature_test = eval_fn(formula, X_test_fold)
 
         # 清理数据
         valid_indices = ~(feature_test.isna() | y_test_fold.isna())
@@ -53,7 +55,6 @@ def evaluate_formula_cross_val(formula, X, y, n_splits):
 
     return ic_scores
 
-
 def cross_validate_formulas(formulas, X, y, n_splits, evaluate_formula_func=None):
     """
     对多个公式进行交叉验证
@@ -68,7 +69,7 @@ def cross_validate_formulas(formulas, X, y, n_splits, evaluate_formula_func=None
     cv_results = {}
 
     for formula in formulas:
-        ic_scores = evaluate_formula_cross_val(formula, X, y, n_splits)
+        ic_scores = evaluate_formula_cross_val(formula, X, y, n_splits, evaluate_formula_func)
         cv_results[formula] = {
             'IC Scores': ic_scores,
             'Mean IC': np.mean(ic_scores),

@@ -44,7 +44,7 @@ class PolicyNetwork(nn.Module):
             nn.Linear(32, 1)
         )
 
-    def forward(self, state_encoding, valid_actions_mask=None):
+    def forward(self, state_encoding, valid_actions_mask=None, lengths=None):
         """
         前向传播
 
@@ -59,21 +59,40 @@ class PolicyNetwork(nn.Module):
         # GRU编码
         gru_out, _ = self.gru(state_encoding)
 
-        # 取最后一个时间步的输出
-        last_hidden = gru_out[:, -1, :]  # [batch_size, 64]
+        if lengths is not None:
+            # 取最后一个有效步
+            # lengths 为实际步数，转为索引需要 -1，并裁到 [0, L-1]
+            L = gru_out.size(1)
+            idx = (lengths - 1).clamp(min=0, max=L - 1)  # [B]
+            last_hidden = gru_out[torch.arange(gru_out.size(0), device=gru_out.device), idx, :]
+        else:
+            last_hidden = gru_out[:, -1, :]  # 回退：用最后一行
+
 
         # 计算动作logits
         action_logits = self.policy_head(last_hidden)  # [batch_size, action_dim]
+        action_logits = torch.clamp(action_logits, min=-20.0, max=20.0)
 
-        # 应用合法动作掩码
         if valid_actions_mask is not None:
-            # 将非法动作的logits设为-inf
-            action_logits = action_logits.masked_fill(~valid_actions_mask, -1e9)
+            # 非法动作置为 -inf，确保 softmax 后概率严格为 0
+            # 注意：不能在这之后再 clamp，否则会把 -inf 复活
+            action_logits = action_logits.masked_fill(~valid_actions_mask, float('-inf'))
 
-        # 转换为概率分布
-        action_probs = F.softmax(action_logits, dim=-1)
+        # 计算概率（log-softmax 更稳健）
+        log_probs = F.log_softmax(action_logits, dim=-1)
+        action_probs = torch.exp(log_probs)
 
-        # 计算状态价值
+        # “全非法行”兜底（避免整行都是 -inf 导致 NaN）
+        if valid_actions_mask is not None:
+            all_invalid = (~valid_actions_mask).all(dim=-1, keepdim=True)  # [batch,1]
+            if all_invalid.any():
+                # 退路：固定把 'END' 的概率设为 1（或您项目里 END 的索引）
+                end_idx = TOKEN_TO_INDEX.get('END', 0)
+                fallback = torch.zeros_like(action_probs)
+                fallback[..., end_idx] = 1.0
+                action_probs = torch.where(all_invalid, fallback, action_probs)
+
+        # 价值头
         state_value = self.value_head(last_hidden)
 
         return action_probs, state_value
@@ -100,17 +119,27 @@ class PolicyNetwork(nn.Module):
             valid_actions_mask[TOKEN_TO_INDEX[token_name]] = True
         valid_actions_mask = valid_actions_mask.unsqueeze(0).to(self.device)
 
-        # 前向传播
         with torch.no_grad():
+            # 直接拿 logits，再统一做 mask/温度/softmax，避免对概率再取 log
+            # 复用 forward 的逻辑即可：传入 valid_actions_mask，内部已做掩码与兜底
             action_probs, _ = self.forward(state_encoding, valid_actions_mask)
 
-        # 温度缩放
-        if temperature != 1.0:
-            action_probs = F.softmax(torch.log(action_probs + 1e-10) / temperature, dim=-1)
+            if temperature != 1.0:
+                # 取对数等效于作用在 logits 上的温度缩放（forward 里已做 log_softmax）
+                log_probs = torch.log(action_probs + 1e-12) / temperature
+                action_probs = torch.softmax(log_probs, dim=-1)
 
-        # 采样动作
-        action_idx = torch.multinomial(action_probs[0], 1).item()
-        action_name = INDEX_TO_TOKEN[action_idx]
-        action_prob = action_probs[0, action_idx].item()
+            # 行内兜底（极罕见场景：数值波动导致全 0）
+            row_sum = action_probs.sum(dim=-1, keepdim=True)
+            zero_row = (row_sum <= 0)
+            if zero_row.any():
+                end_idx = TOKEN_TO_INDEX.get('END', 0)
+                fallback = torch.zeros_like(action_probs)
+                fallback[..., end_idx] = 1.0
+                action_probs = torch.where(zero_row, fallback, action_probs)
+
+            action_idx = torch.multinomial(action_probs[0], 1).item()
+            action_name = INDEX_TO_TOKEN[action_idx]
+            action_prob = action_probs[0, action_idx].item()
 
         return action_name, action_prob
