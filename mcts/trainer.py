@@ -180,11 +180,12 @@ class RiskMinerTrainer:
             # 计算这一步的奖励
             if best_child.state.token_sequence[-1].name == 'END':
                 reward = self.reward_calculator.calculate_terminal_reward(
-                    best_child.state, self.X_data, self.y_data
+                    best_child.state, self.X_train_sample, self.y_train_sample
                 )
+
             else:
                 reward = self.reward_calculator.calculate_intermediate_reward(
-                    best_child.state, self.X_data, self.y_data
+                    best_child.state, self.X_train_sample, self.y_train_sample
                 )
 
             trajectory.append((current.state, best_action, reward))
@@ -196,8 +197,9 @@ class RiskMinerTrainer:
             terminal_state = current.state.copy()
             terminal_state.add_token('END')
             terminal_reward = self.reward_calculator.calculate_terminal_reward(
-                terminal_state, self.X_data, self.y_data
+                terminal_state, self.X_train_sample, self.y_train_sample
             )
+
             trajectory.append((current.state, 'END', terminal_reward))
 
         return trajectory
@@ -232,7 +234,7 @@ class RiskMinerTrainer:
             # 检查是否以END结束
             if final_state.token_sequence[-1].name == 'END':
                 formula_rpn = ' '.join([t.name for t in final_state.token_sequence])
-                alpha_values = self.formula_evaluator.evaluate(formula_rpn, self.X_data)
+                alpha_values = self.formula_evaluator.evaluate(formula_rpn, self.X_train_sample)
 
                 if alpha_values is not None and not alpha_values.isna().all():
                     # 新增：检查是否为常数

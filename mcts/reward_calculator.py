@@ -2,7 +2,8 @@ import numpy as np
 from scipy.stats import spearmanr, pearsonr
 import logging
 from sklearn.linear_model import LinearRegression
-
+import pandas as pd
+from utils.metrics import calculate_ic
 from core import RPNEvaluator,RPNValidator
 from alpha import FormulaEvaluator
 
@@ -44,8 +45,6 @@ class RewardCalculator:
         return std < self.min_std
 
 
-    def calculate_ic(self, predictions, targets):
-        return self._calculate_ic(predictions, targets)
 
     def calculate_intermediate_reward(self, state, X_data, y_data):
         cache_key = ' '.join([t.name for t in state.token_sequence])
@@ -79,7 +78,7 @@ class RewardCalculator:
                     result = -1.0  # 严厉惩罚常数因子
                 else:
                     # 计算IC
-                    ic = self._calculate_ic(alpha_values, y_sample)
+                    ic = self.calculate_ic(alpha_values, y_sample)
 
                     # 额外奖励高变异性的因子
                     if hasattr(alpha_values, 'values'):
@@ -145,7 +144,7 @@ class RewardCalculator:
                 return -2.0  # 更严厉的惩罚
 
             # 计算个体IC
-            individual_ic = self._calculate_ic(alpha_values, y_data)
+            individual_ic = self.calculate_ic(alpha_values, y_data)
 
             # 新增：IC太低则惩罚
             if abs(individual_ic) < 0.01:
@@ -175,7 +174,7 @@ class RewardCalculator:
                     logger.info(f"  IC={individual_ic:.4f}")
 
             # 计算合成IC
-            composite_ic = self._calculate_composite_ic(y_data)
+            composite_ic = self._calculate_composite_ic(X_data, y_data)
 
             return composite_ic
 
@@ -185,8 +184,8 @@ class RewardCalculator:
 
 
 
-    def _calculate_ic(self, predictions, targets):
-        """计算IC（Pearson相关系数）- 修正版"""
+    def calculate_ic(self, predictions, targets):
+        """计算IC（Pearson相关系数"""
         try:
             # 处理predictions
             if hasattr(predictions, 'values'):
@@ -234,97 +233,81 @@ class RewardCalculator:
             return 0.0
 
     def _calculate_mutual_ic(self, alpha1_values, alpha2_values):
-        """计算两个alpha的相互IC"""
+        """计算两个alpha的相互IC；对近常数/样本不足短路为0，避免SciPy警告与不稳定信号"""
         try:
+            # 转成扁平 ndarray
             if hasattr(alpha1_values, 'values'):
                 alpha1_values = alpha1_values.values
             if hasattr(alpha2_values, 'values'):
                 alpha2_values = alpha2_values.values
 
-            alpha1 = np.array(alpha1_values).flatten()
-            alpha2 = np.array(alpha2_values).flatten()
+            alpha1 = np.asarray(alpha1_values, dtype=float).ravel()
+            alpha2 = np.asarray(alpha2_values, dtype=float).ravel()
 
-            min_len = min(len(alpha1), len(alpha2))
-            alpha1 = alpha1[:min_len]
-            alpha2 = alpha2[:min_len]
+            # 对齐长度
+            L = int(min(len(alpha1), len(alpha2)))
+            alpha1 = alpha1[:L]
+            alpha2 = alpha2[:L]
 
-            valid_mask = ~(np.isnan(alpha1) | np.isnan(alpha2))
-            if valid_mask.sum() < 2:
+            # 去 NaN
+            valid = ~(np.isnan(alpha1) | np.isnan(alpha2))
+            if valid.sum() < 2:
                 return 0.0
 
-            corr, _ = pearsonr(alpha1[valid_mask], alpha2[valid_mask])
-            return corr if not np.isnan(corr) else 0.0
+            a1 = alpha1[valid]
+            a2 = alpha2[valid]
+
+            # 近常数短路（与 self.min_std 一致）
+            if np.std(a1) < getattr(self, 'min_std', 1e-6) or np.std(a2) < getattr(self, 'min_std', 1e-6):
+                return 0.0
+
+            # 计算 Pearson 相关（mutIC）
+            corr, _ = pearsonr(a1, a2)
+            return float(corr) if not np.isnan(corr) else 0.0
 
         except Exception as e:
             logger.error(f"Error calculating mutual IC: {e}")
             return 0.0
 
-    def _calculate_composite_ic(self, y_data):
-        """
-        计算合成alpha的IC（论文Algorithm 1）
-        使用线性回归组合所有alpha
-        """
+    def _calculate_composite_ic(self, X_data, y_data):
         if len(self.alpha_pool) == 0:
             return 0.0
 
-        try:
-            # 筛选有效alpha
-            valid_alphas = [a for a in self.alpha_pool
-                            if 'values' in a and a['values'] is not None]
+            # 仅取有公式字段的
+        formulas = [a['formula'] for a in self.alpha_pool if 'formula' in a]
+        X_mat, y_vec = self._build_design_matrix(formulas, X_data, y_data)
+        if X_mat is None:
+            # 回退：用池内 alpha 的平均 IC
+            valid_ic = [a.get('ic', 0.0) for a in self.alpha_pool if 'ic' in a]
+            return float(np.mean(valid_ic)) if valid_ic else 0.0
 
-            if len(valid_alphas) == 0:
-                return 0.0
+        self.linear_model = LinearRegression(fit_intercept=False)
+        self.linear_model.fit(X_mat, y_vec)
 
-            # 如果只有一个alpha，直接返回其IC
-            if len(valid_alphas) == 1:
-                return valid_alphas[0].get('ic', 0)
+        # 同步权重（可选）
+        weights = self.linear_model.coef_
+        for i, a in enumerate(self.alpha_pool):
+            if i < len(weights):
+                a['weight'] = float(weights[i])
 
-            # 构建特征矩阵
-            feature_matrix = []
-            for alpha in valid_alphas:
-                values = alpha['values']
-                if hasattr(values, 'values'):
-                    values = values.values
-                feature_matrix.append(np.array(values).flatten())
+        pred = self.linear_model.predict(X_mat)
+        return float(calculate_ic(pred, y_vec))
 
-            feature_matrix = np.column_stack(feature_matrix)
-
-            # 准备目标数据
-            if hasattr(y_data, 'values'):
-                y_array = y_data.values
-            else:
-                y_array = np.array(y_data).flatten()
-
-            # 对齐长度
-            min_len = min(len(feature_matrix), len(y_array))
-            feature_matrix = feature_matrix[:min_len]
-            y_array = y_array[:min_len]
-
-            # 移除NaN
-            valid_mask = ~(np.any(np.isnan(feature_matrix), axis=1) | np.isnan(y_array))
-
-            if valid_mask.sum() < 10:
-                # 数据太少，返回平均IC
-                return np.mean([a.get('ic', 0) for a in valid_alphas])
-
-            # 训练线性模型（论文的核心）
-            self.linear_model = LinearRegression(fit_intercept=False)
-            self.linear_model.fit(feature_matrix[valid_mask], y_array[valid_mask])
-
-            # 更新权重
-            weights = self.linear_model.coef_
-            for i, alpha in enumerate(valid_alphas):
-                if i < len(weights):
-                    alpha['weight'] = weights[i]
-
-            # 计算合成预测
-            composite_predictions = self.linear_model.predict(feature_matrix[valid_mask])
-
-            # 计算合成IC
-            composite_ic = self._calculate_ic(composite_predictions, y_array[valid_mask])
-
-            return composite_ic
-
-        except Exception as e:
-            logger.error(f"Error in composite IC: {e}")
-            return np.mean([a.get('ic', 0) for a in self.alpha_pool if 'ic' in a])
+    def _build_design_matrix(self, formulas, X_data: pd.DataFrame, y_data: pd.Series):
+        cols = []
+        for f in formulas:
+            s = self.formula_evaluator.evaluate(f, X_data, allow_partial=False)
+            if s is None:
+                continue
+            if not isinstance(s, pd.Series):
+                s = pd.Series(np.asarray(s).reshape(-1), index=X_data.index)
+            s = s.replace([np.inf, -np.inf], np.nan).rename(f)
+            cols.append(s)
+        if not cols:
+            return None, None
+        df = pd.concat(cols + [y_data.rename('_y')], axis=1, join='inner').dropna()
+        if df.shape[0] < 50 or df.shape[1] <= 1:
+            return None, None
+        X_mat = df.drop(columns=['_y']).to_numpy()
+        y_vec = df['_y'].to_numpy()
+        return X_mat, y_vec

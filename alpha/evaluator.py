@@ -60,9 +60,7 @@ class FormulaEvaluator:
 
         # 验证Token序列
         if not allow_partial and not self._is_complete_expression(token_sequence):
-            logger.warning(f"Incomplete RPN expression: {formula[:50]}...")
-            if not RPNValidator.is_valid_partial_expression(token_sequence):
-                return self._create_nan_series(data)
+            return self._create_nan_series(data)
 
         # 准备数据
         data_dict = self._prepare_data(data)
@@ -229,25 +227,11 @@ class FormulaEvaluator:
         data_id = id(data)
         return f"{formula}_{data_id}_{allow_partial}"
 
-    def evaluate_state(self, state, X_data) -> Optional[np.ndarray]:
-        """
-            return：评估结果的数组，失败返回None
-        """
+    def evaluate_state(self, state, X_data) -> Optional[pd.Series]:
         try:
-            # 构建RPN字符串
             rpn_string = ' '.join([t.name for t in state.token_sequence])
-
-            # 评估
             result = self.evaluate(rpn_string, X_data, allow_partial=True)
-
-            # 转换为数组
-            if result is not None:
-                if hasattr(result, 'values'):
-                    return result.values
-                else:
-                    return np.array(result)
-            return None
-
+            return result  # 直接返回 Series
         except Exception as e:
             logger.error(f"Error evaluating state: {e}")
             return None

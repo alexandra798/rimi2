@@ -94,6 +94,9 @@ class RiskSeekingOptimizer:
 
             # 修改终点 计算价值损失
             value_loss = F.mse_loss(values.squeeze(), returns_tensor)
+            # UserWarning: Using a target size (torch.Size([1])) that is different to the input size (torch.Size([])).
+            # This will likely lead to incorrect results due to broadcasting. Please ensure they have the same size.
+            # value_loss = F.mse_loss(values.squeeze(), returns_tensor)
 
             # 总损失
             total_loss = policy_loss + 0.5 * value_loss

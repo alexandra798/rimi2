@@ -388,18 +388,22 @@ class RPNEvaluator:
                 return data.rolling(window=window, min_periods=min_periods).kurt().fillna(0)
 
         elif op_name == 'ts_wma':
-            weights = np.arange(1, window + 1)
-            weights = weights / weights.sum()
+            # 加权移动平均，忽略 NaN 并重标化权重
+            weights = np.arange(1, window + 1, dtype=np.float64)
 
             def weighted_mean(x):
-                if len(x) < window:
-                    w = weights[:len(x)]
-                    w = w / w.sum()
-                else:
-                    w = weights
-                return np.dot(x, w)
+                # x 是 ndarray（raw=True）
+                x = np.asarray(x, dtype=float)
+                m = ~np.isnan(x)
+                if not m.any():
+                    return 0.0
+                x = x[m]
+                w = weights[:len(x)]
+                w = w / w.sum()
+                return float(np.dot(x, w))
 
-            return data.rolling(window=window, min_periods=1).apply(weighted_mean)
+            return data.rolling(window=window, min_periods=1).apply(weighted_mean, raw=True)
+
 
         elif op_name == 'ts_ema':
             return data.ewm(span=window, adjust=False, min_periods=1).mean()
@@ -627,27 +631,29 @@ class RPNEvaluator:
 
         # ================== ts_wma: 加权移动平均 ==================
         elif op_name == 'ts_wma':
-            # 创建线性权重
+            # 线性权重；窗口内按有效样本重标化
             full_weights = np.arange(1, window + 1, dtype=np.float64)
             full_weights = full_weights / full_weights.sum()
 
             for i in range(data_len):
                 start_idx = max(0, i - window + 1)
                 window_data = data[start_idx:i + 1]
-                window_len = len(window_data)
+                if window_data.size == 0:
+                    result[i] = 0.0
+                    continue
 
-                if window_len > 0:
-                    # 调整权重以匹配窗口大小
-                    if window_len < window:
-                        weights = np.arange(1, window_len + 1, dtype=np.float64)
-                        weights = weights / weights.sum()
-                    else:
-                        weights = full_weights
+                m = ~np.isnan(window_data)
+                if not m.any():
+                    # 没有有效样本：继承上一有效值或置0
+                    result[i] = result[i - 1] if i > 0 and np.isfinite(result[i - 1]) else 0.0
+                    continue
 
-                    result[i] = np.dot(window_data, weights)
-                else:
-                    result[i] = data[i]
+                valid = window_data[m]
+                w = np.arange(1, len(valid) + 1, dtype=np.float64)
+                w = w / w.sum()
+                result[i] = float(np.dot(valid, w))
             return result
+
 
         # ================== ts_ema: 指数移动平均 ==================
         elif op_name == 'ts_ema':

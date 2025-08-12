@@ -36,31 +36,18 @@ def calculate_ic(predictions, targets, method='pearman'):
 
 
 def calculate_sharpe_ratio(returns, risk_free_rate=0.0, periods=252):
-    """
-    计算夏普比率
-
-    Args:
-        returns: 收益率序列
-        risk_free_rate: 无风险利率
-        periods: 年化因子（日频数据为252）
-
-    Returns:
-        夏普比率
-    """
-    excess_returns = returns - risk_free_rate / periods
-
-    if len(excess_returns) < 2:
+    arr = np.asarray(getattr(returns, 'values', returns), dtype=float).ravel()
+    rf = risk_free_rate / periods
+    arr = arr - rf
+    arr = arr[np.isfinite(arr)]
+    if arr.size < 2:
         return 0.0
-
-    mean_excess_return = np.mean(excess_returns)
-    std_excess_return = np.std(excess_returns, ddof=1)
-
-    if std_excess_return == 0:
+    mu = np.nanmean(arr)
+    sigma = np.nanstd(arr, ddof=1)
+    if sigma == 0 or not np.isfinite(sigma):
         return 0.0
+    return float(np.sqrt(periods) * mu / sigma)
 
-    sharpe_ratio = np.sqrt(periods) * mean_excess_return / std_excess_return
-
-    return sharpe_ratio
 
 
 def calculate_max_drawdown(cumulative_returns):

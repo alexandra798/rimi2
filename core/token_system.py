@@ -236,35 +236,4 @@ class RPNValidator:
         return RPNValidator.calculate_stack_size(token_sequence) == 1
 
 
-class FormulaGenerator:
-    """基于Token的公式生成器"""
-
-    def __init__(self):
-        self.token_sequence = [TOKEN_DEFINITIONS['BEG']]
-        self.operand_stack_count = 0
-
-    def add_next_token(self, token_name):
-        """逐个添加Token构建公式"""
-        if token_name not in TOKEN_DEFINITIONS:
-            raise ValueError(f"Unknown token: {token_name}")
-
-        token = TOKEN_DEFINITIONS[token_name]
-        self.token_sequence.append(token)
-        self.update_stack_count(token)
-        return token
-
-    def update_stack_count(self, token):
-        if token.type == TokenType.OPERATOR:
-            eff_arity = 2 if token.name in ('corr', 'cov') else token.arity
-            self.operand_stack_count = self.operand_stack_count - eff_arity + 1
-        else:
-            self.operand_stack_count += 1
-
-    def can_terminate(self):
-        """检查是否可以结束（栈中正好剩1个操作数）"""
-        return self.operand_stack_count == 1
-
-    def get_valid_actions(self):
-        """获取当前状态下的合法动作"""
-        return RPNValidator.get_valid_next_tokens(self.token_sequence)
 
