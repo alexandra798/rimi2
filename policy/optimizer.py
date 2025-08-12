@@ -35,40 +35,64 @@ class RiskSeekingOptimizer:
     def train_on_episode(self, episode_trajectory):
         """
         使用一个episode的轨迹训练策略网络
-
-        Args:
-            episode_trajectory: [(state, action, reward), ...] 列表
+        Args: episode_trajectory: [(state, action, reward), ...] 列表
         """
         # 计算episode总奖励
         total_reward = sum([r for _, _, r in episode_trajectory])
-
         # 更新分位数估计
         self.update_quantile(total_reward)
 
         # 只有当奖励超过分位数时才更新（风险寻求）
         if total_reward > self.quantile_estimate:
+
             # 构建训练数据
-            states = []
-            actions = []
+            states_enc = []
+            actions_idx = []
             rewards = []
+            masks = []
+            lengths = []
 
             for state, action, reward in episode_trajectory:
-                states.append(state.encode_for_network())
-                actions.append(TOKEN_TO_INDEX[action])
+                pre_state = state
+                # 若发现轨迹里存的是“后状态”，尝试自动回退一步（常见于把 END 先写进 state 再当作动作）
+                if len(pre_state.token_sequence) >= 2 and pre_state.token_sequence[-1].name == action:
+                    pre_state = pre_state.copy()
+                    # 回退最后一个 token
+                    pre_state.token_sequence.pop()
+                    pre_state.step_count = max(0, pre_state.step_count - 1)
+                    # 依据 token 序列重算栈高
+                    pre_state.stack_size = RPNValidator.calculate_stack_size(pre_state.token_sequence)
+                # 取合法动作集并做强校验
+                valid_tokens = RPNValidator.get_valid_next_tokens(pre_state.token_sequence)
+                assert action in valid_tokens, \
+                    f"Invalid action '{action}' for given state. Valid: {valid_tokens}"
+
+                # 编码 & 收集
+                states_enc.append(pre_state.encode_for_network())
+                actions_idx.append(TOKEN_TO_INDEX[action])
                 rewards.append(reward)
 
+                row_mask = [False] * len(TOKEN_TO_INDEX)
+                for name in valid_tokens:
+                    row_mask[TOKEN_TO_INDEX[name]] = True
+                masks.append(row_mask)
+
+                # 实际长度=token_sequence长度（不超过编码最大步长30）
+                lengths.append(min(len(pre_state.token_sequence), 30))
+
             # 转换为张量
-            states_array = np.array(states)  # 先转换为单个numpy数组
-            states_tensor = torch.FloatTensor(states_array).to(self.device)
-            actions_tensor = torch.LongTensor(actions).to(self.device)
+            states_tensor = torch.as_tensor(np.array(states_enc), dtype=torch.float32, device=self.device)
+            actions_tensor = torch.as_tensor(actions_idx, dtype=torch.long, device=self.device)
+            masks_tensor = torch.as_tensor(masks, dtype=torch.bool, device=self.device)
+            lengths_tensor = torch.as_tensor(lengths, dtype=torch.long, device=self.device)
 
             # 计算累积奖励（可以使用折扣因子）
             returns = []
-            G = 0
+            G = 0.0
             for r in reversed(rewards):
                 G = r + 0.99 * G  # 折扣因子0.99
                 returns.insert(0, G)
-            returns_tensor = torch.FloatTensor(returns).to(self.device)
+            returns_tensor = torch.as_tensor(returns, dtype=torch.float32, device=self.device)
 
             masks = []
             lengths = []
@@ -84,16 +108,32 @@ class RiskSeekingOptimizer:
             lengths_tensor = torch.LongTensor(lengths).to(self.device)
 
             # 前向传播
-            action_probs, values = self.policy_network(states_tensor, valid_actions_mask=masks_tensor,
-                                                       lengths=lengths_tensor)
+            action_probs, values, log_probs = self.policy_network(
+                states_tensor,
+                valid_actions_mask=masks_tensor,
+                lengths=lengths_tensor,
+                return_log_probs=True
+            )
 
             # 计算策略损失（REINFORCE with baseline）
-            log_probs = torch.log(action_probs.gather(1, actions_tensor.unsqueeze(1)))
-            advantages = returns_tensor - values.squeeze()
-            policy_loss = -(log_probs.squeeze() * advantages.detach()).mean()
+            # 取每条轨迹动作的 log-prob
+            chosen_log_probs = log_probs.gather(1, actions_tensor.unsqueeze(1)).squeeze(1)
+
+            # 如果仍然出现 -inf，立刻抛错（一定是状态-动作不匹配没修干净）
+            if not torch.isfinite(chosen_log_probs).all():
+                bad = (~torch.isfinite(chosen_log_probs)).nonzero(as_tuple=False).squeeze(-1).tolist()
+                raise RuntimeError(f"Chosen log-prob is not finite at indices {bad}; "
+                                   f"check episode states are pre-action and action valid.")
+
+            values_flat = values.squeeze(-1)
+            assert values_flat.shape == returns_tensor.shape, \
+                f"value/return shape mismatch: {values_flat.shape} vs {returns_tensor.shape}"
+            advantages = returns_tensor - values_flat
+            policy_loss = -(chosen_log_probs * advantages.detach()).mean()
 
             # 修改终点 计算价值损失
-            value_loss = F.mse_loss(values.squeeze(), returns_tensor)
+
+            value_loss = F.mse_loss(values_flat, returns_tensor)
             # UserWarning: Using a target size (torch.Size([1])) that is different to the input size (torch.Size([])).
             # This will likely lead to incorrect results due to broadcasting. Please ensure they have the same size.
             # value_loss = F.mse_loss(values.squeeze(), returns_tensor)

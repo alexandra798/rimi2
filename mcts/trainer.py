@@ -20,21 +20,20 @@ logger = logging.getLogger(__name__)
 
 
 class RiskMinerTrainer:
-    """完整的RiskMiner训练器"""
 
-    def __init__(self, X_data, y_data, device=None, use_sampling=True):
+    def __init__(self, X_data, y_data, device=None, use_sampling=True, sample_size=50000, random_seed=42):
         self.X_data = X_data
         self.y_data = y_data
         self.use_sampling = use_sampling
 
         # 如果数据太大，创建采样版本用于训练
-        if use_sampling and len(X_data) > 50000:
+        if use_sampling and len(X_data) > sample_size:
             logger.info(f"Data too large ({len(X_data)} rows), creating sampled version...")
-            sample_size = min(50000, len(X_data))
+            np.random.seed(random_seed)
             sample_indices = np.random.choice(len(X_data), sample_size, replace=False)
             self.X_train_sample = X_data.iloc[sample_indices]
             self.y_train_sample = y_data.iloc[sample_indices]
-            logger.info(f"Using {sample_size} samples for MCTS training")
+            logger.info(f"Using {sample_size} samples for MCTS training (seed={random_seed})")
         else:
             self.X_train_sample = X_data
             self.y_train_sample = y_data
@@ -51,14 +50,10 @@ class RiskMinerTrainer:
         self.optimizer = RiskSeekingOptimizer(self.policy_network, device=self.device)
         self.mcts_searcher = MCTSSearcher(self.policy_network, device=self.device)
         self.alpha_pool = []
-        self.reward_calculator = RewardCalculator(self.alpha_pool)
+        self.reward_calculator = RewardCalculator(self.alpha_pool, random_seed=random_seed)
         self.formula_evaluator = FormulaEvaluator()  # 使用统一的评估器
 
-
-
         logger.info(f"Policy network moved to {self.device}")
-
-
 
 
     def train(self, num_iterations=200, num_simulations_per_iteration=50):
@@ -91,8 +86,8 @@ class RiskMinerTrainer:
             root_node=root,
             mdp_env=self.mdp_env,
             reward_calculator=self.reward_calculator,
-            X_data=self.X_data,
-            y_data=self.y_data
+            X_data=self.X_train_sample,  # 使用采样集而非全量
+            y_data=self.y_train_sample  # 使用采样集而非全量
         )
 
     def collect_trajectories_with_mcts(self, num_episodes, num_simulations_per_episode):
@@ -111,7 +106,7 @@ class RiskMinerTrainer:
             for sim in range(num_simulations_per_episode):
                 if sim % 10 == 0:
                     logger.debug(f"  Simulation {sim}/{num_simulations_per_episode}")
-                trajectory = self.search_one_iteration_with_sample(root)
+                trajectory = self.search_one_iteration(root)
 
             # 选择最佳动作序列作为最终轨迹
             final_trajectory = self.extract_best_trajectory(root)
@@ -124,15 +119,7 @@ class RiskMinerTrainer:
 
         return all_trajectories
 
-    def search_one_iteration_with_sample(self, root):
-        """使用采样数据进行搜索"""
-        return self.mcts_searcher.search_one_iteration(
-            root_node=root,
-            mdp_env=self.mdp_env,
-            reward_calculator=self.reward_calculator,
-            X_data=self.X_train_sample,  # 使用采样数据
-            y_data=self.y_train_sample  # 使用采样数据
-        )
+
 
     def train_policy_network(self, trajectories):
         """训练策略网络"""

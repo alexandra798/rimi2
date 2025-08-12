@@ -76,7 +76,30 @@ class FormulaEvaluator:
             )
 
             # 转换结果为Series
-            return self._convert_to_series(result, data)
+            series_result = self._convert_to_series(result, data)
+
+            # ===== 新增：全局NaN和常数检测处理 =====
+            if series_result is not None and not series_result.isna().all():
+                # 1. 处理inf值
+                series_result = series_result.replace([np.inf, -np.inf], np.nan)
+
+                # 2. 检测常数（标准差极小）
+                valid_values = series_result.dropna()
+                if len(valid_values) > 10:
+                    std = valid_values.std()
+                    if std < 1e-6:  # 常数检测阈值
+                        logger.debug(f"Formula produces constant values (std={std:.8f}): {formula[:50]}...")
+                        return self._create_nan_series(data)  # 返回NaN表示无效
+
+                # 3. 智能填充NaN
+                # 先尝试前向填充（用历史值）
+                series_result = series_result.ffill()
+                # 再后向填充（处理开头的NaN）
+                series_result = series_result.bfill()
+                # 最后用0填充（如果整列都是NaN）
+                series_result = series_result.fillna(0)
+
+            return series_result
 
         except Exception as e:
             logger.error(f"RPN evaluation failed: {type(e).__name__}: {str(e)}")
@@ -222,10 +245,40 @@ class FormulaEvaluator:
         return stack_size == 1  # 完整表达式应该正好留下1个结果
 
     def _generate_cache_key(self, formula: str, data: Any, allow_partial: bool) -> str:
-        """生成缓存键"""
-        # 使用公式和数据ID以及allow_partial标志作为键
-        data_id = id(data)
-        return f"{formula}_{data_id}_{allow_partial}"
+        """生成缓存键 - 使用数据内容哈希而非id"""
+
+        import hashlib
+        if isinstance(data, pd.DataFrame):
+            # DataFrame: 使用值和索引的哈希
+            data_hash = hashlib.md5(
+                data.values.tobytes() +
+                str(data.index.tolist()).encode()
+            ).hexdigest()[:8]  # 只取前8位避免太长
+        elif isinstance(data, dict):
+            # Dict: 使用所有值的哈希
+            combined = b''
+            for key in sorted(data.keys()):  # 排序保证一致性
+                value = data[key]
+                if hasattr(value, 'values'):
+                    combined += value.values.tobytes()
+                elif isinstance(value, (list, np.ndarray)):
+                    combined += np.array(value).tobytes()
+                else:
+                    combined += str(value).encode()
+            data_hash = hashlib.md5(combined).hexdigest()[:8]
+        else:
+            # 其他类型：退回到id（向后兼容）
+            data_hash = str(id(data))
+
+        return f"{formula}_{data_hash}_{allow_partial}"
+
+
+
+
+
+
+
+
 
     def evaluate_state(self, state, X_data) -> Optional[pd.Series]:
         try:

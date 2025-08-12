@@ -20,6 +20,9 @@ class MDPState:
         self.stack_size = 0
 
     def add_token(self, token_name):
+        if token_name == 'BEG' and self.step_count > 0:
+            raise ValueError("BEG can only appear at position 0")
+
         token = TOKEN_DEFINITIONS[token_name]
         self.token_sequence.append(token)
         self.step_count += 1

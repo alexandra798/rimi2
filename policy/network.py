@@ -44,14 +44,16 @@ class PolicyNetwork(nn.Module):
             nn.Linear(32, 1)
         )
 
-    def forward(self, state_encoding, valid_actions_mask=None, lengths=None):
+    def forward(self, state_encoding, valid_actions_mask=None, lengths=None,return_log_probs=False):
         """
         Args:
             state_encoding: [batch_size, seq_len, state_dim] 状态编码
             valid_actions_mask: [batch_size, action_dim] 合法动作掩码
+             return_log_probs: 是否返回log概率（供优化器使用）
         Returns:
             action_probs: [batch_size, action_dim] 动作概率分布
             state_value: [batch_size, 1] 状态价值估计
+            log_probs: [batch_size, action_dim] 动作对数概率（可选）
         """
 
         # GRU编码
@@ -89,10 +91,17 @@ class PolicyNetwork(nn.Module):
                 fallback = torch.zeros_like(action_probs)
                 fallback[..., end_idx] = 1.0
                 action_probs = torch.where(all_invalid, fallback, action_probs)
+                # 同时修正log_probs
+                fallback_log = torch.full_like(log_probs, float('-inf'))
+                fallback_log[..., end_idx] = 0.0
+                log_probs = torch.where(all_invalid, fallback_log, log_probs)
         # 价值头
         state_value = self.value_head(last_hidden)
 
-        return action_probs, state_value
+        if return_log_probs:
+            return action_probs, state_value, log_probs
+        else:
+            return action_probs, state_value
 
     def get_action(self, state, temperature=1.0):
         """

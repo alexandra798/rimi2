@@ -282,7 +282,12 @@ class MCTSSearcher:
         valid_actions_mask = valid_actions_mask.unsqueeze(0).to(self.device)
 
         with torch.no_grad():
-            action_probs, value = self.policy_network(state_encoding, valid_actions_mask)
+            # 不需要log_probs，只要action_probs
+            result = self.policy_network(state_encoding, valid_actions_mask, return_log_probs=False)
+            if len(result) == 3:
+                action_probs, value, _ = result
+            else:
+                action_probs, value = result
 
         # 转换并清洗为概率字典（非负、有限、和为1；否则均匀分布）
         probs = {}

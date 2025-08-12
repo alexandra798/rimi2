@@ -3,6 +3,8 @@ import numpy as np
 import pandas as pd
 import logging
 
+from scipy import stats
+
 logger = logging.getLogger(__name__)
 
 
@@ -10,156 +12,581 @@ class Operators:
     """所有操作符的静态方法集合"""
 
     @staticmethod
+    def ensure_series_or_array(operand, data_length=None, data_index=None):
+        """确保操作数是Series或Array"""
+        if isinstance(operand, (int, float)) and data_length:
+            if data_index is not None:
+                return pd.Series(operand, index=data_index)
+            else:
+                return pd.Series([operand] * data_length)
+        return operand
+    # =================================
+    @staticmethod
     def safe_divide(x, y, default_value=0):
         """安全除法函数，避免除零错误"""
-        with np.errstate(divide='ignore', invalid='ignore'):
-            result = np.where(np.abs(y) < 1e-8, default_value, x / y)
-            result = np.where(np.isnan(result) | np.isinf(result), default_value, result)
-        return result
-
-    # 基础操作符
-    @staticmethod
-    def ts_ref(x, t):
-        """Ref operator: t天前的值"""
         if isinstance(x, pd.Series):
-            return x.shift(t)
-        elif isinstance(x, pd.DataFrame):
-            return x.shift(t)
+            return x.div(y).replace([np.inf, -np.inf], 0).fillna(default_value)
         else:
-            raise TypeError("ref operator requires pandas Series or DataFrame")
+            return np.divide(x, y, out=np.full_like(x, default_value, dtype=float), where=y != 0)
+
+    # 一元操作符====================
 
     @staticmethod
-    def csrank(x):
-        """CSRank operator: 横截面排名"""
-        if isinstance(x, pd.Series):
-            if isinstance(x.index, pd.MultiIndex):
-                return x.groupby(level=1).rank(pct=True)
+    def csrank(operand, data_length=None, data_index=None):
+        """横截面排名"""
+        operand = Operators.ensure_series_or_array(operand, data_length, data_index)
+        if isinstance(operand, pd.Series):
+            if isinstance(operand.index, pd.MultiIndex):
+                return operand.groupby(level=1).rank(pct=True)
             else:
-                return x.rank(pct=True)
+                return operand.rank(pct=True)
         else:
-            raise TypeError("csrank operator requires pandas Series")
-
-    # 一元操作符
-    @staticmethod
-    def sign(x):
-        """Sign operator: 返回1如果x为正，否则返回0"""
-        return np.where(x > 0, 1, 0)
+            # NumPy数组
+            return stats.rankdata(operand, method='average') / len(operand)
 
     @staticmethod
-    def abs_op(x):
-        """Abs operator: 绝对值"""
-        return np.abs(x)
-
-    @staticmethod
-    def log(x):
-        """Log operator: 与 RPNEvaluator 保持一致的安全 log：log(max(|x|+1e-10, 1e-10))"""
-        if isinstance(x, pd.Series):
-            return np.log(np.maximum(x.abs() + 1e-10, 1e-10))
+    def sign(operand, data_length=None, data_index=None):
+        """符号函数：正数返回1，非正返回0"""
+        operand = Operators.ensure_series_or_array(operand, data_length, data_index)
+        if isinstance(operand, pd.Series):
+            return (operand > 0).astype(float)
         else:
-            x = np.asarray(x)
-            return np.log(np.maximum(np.abs(x) + 1e-10, 1e-10))
-
-    # 比较操作符
-    @staticmethod
-    def greater(x, y):
-        """Greater operator: x > y返回1，否则0"""
-        return np.where(x > y, 1, 0)
+            return np.where(operand > 0, 1.0, 0.0)
 
     @staticmethod
-    def less(x, y):
-        """Less operator: x < y返回1，否则0"""
-        return np.where(x < y, 1, 0)
+    def abs(operand, data_length=None, data_index=None):
+        """绝对值操作符"""
+        operand = Operators.ensure_series_or_array(operand, data_length, data_index)
+        return np.abs(operand)
 
-    # 时序操作符
     @staticmethod
-    def ts_rank(x, t):
-        """Rank operator: 当前值在过去t天中的排名"""
-        if isinstance(x, pd.Series):
-            return x.rolling(window=t, min_periods=1).apply(
-                lambda w: pd.Series(w).rank(pct=True).iloc[-1]
-            )
+    def log(operand, data_length=None, data_index=None):
+        """安全的log操作: log(max(|x|+1e-10, 1e-10))"""
+        operand = Operators.ensure_series_or_array(operand, data_length, data_index)
+        if isinstance(operand, pd.Series):
+            return np.log(np.maximum(operand.abs() + 1e-10, 1e-10))
         else:
-            raise TypeError("rank operator requires pandas Series")
+            return np.log(np.maximum(np.abs(operand) + 1e-10, 1e-10))
+
+
+    # 二元操作符========================================
+    @staticmethod
+    def _align_operands(operand1, operand2):
+        """对齐两个操作数的形状"""
+        if isinstance(operand1, (int, float)) and isinstance(operand2, (pd.Series, np.ndarray)):
+            if isinstance(operand2, pd.Series):
+                operand1 = pd.Series(operand1, index=operand2.index)
+            else:
+                operand1 = np.full(len(operand2), operand1)
+        elif isinstance(operand2, (int, float)) and isinstance(operand1, (pd.Series, np.ndarray)):
+            if isinstance(operand1, pd.Series):
+                operand2 = pd.Series(operand2, index=operand1.index)
+            else:
+                operand2 = np.full(len(operand1), operand2)
+        return operand1, operand2
 
     @staticmethod
-    def std(x, t):
-        """Std operator: 过去t天的标准差"""
-        if isinstance(x, pd.Series):
-            return x.rolling(window=t, min_periods=1).std().fillna(0)
-        else:
-            raise TypeError("std operator requires pandas Series")
+    def add(operand1, operand2, data_length=None, data_index=None):
+        """加法操作符"""
+        operand1, operand2 = Operators._align_operands(operand1, operand2)
+        return operand1 + operand2
 
     @staticmethod
-    def ts_max(x, t):
-        """Max operator: 过去t天的最大值"""
-        if isinstance(x, pd.Series):
-            return x.rolling(window=t, min_periods=1).max()
-        else:
-            raise TypeError("ts_max operator requires pandas Series")
+    def sub(operand1, operand2, data_length=None, data_index=None):
+        """减法操作符"""
+        operand1, operand2 = Operators._align_operands(operand1, operand2)
+        return operand1 - operand2
 
     @staticmethod
-    def ts_min(x, t):
-        """Min operator: 过去t天的最小值"""
-        if isinstance(x, pd.Series):
-            return x.rolling(window=t, min_periods=1).min()
-        else:
-            raise TypeError("ts_min operator requires pandas Series")
+    def mul(operand1, operand2, data_length=None, data_index=None):
+        """乘法操作符"""
+        operand1, operand2 = Operators._align_operands(operand1, operand2)
+        return operand1 * operand2
 
     @staticmethod
-    def skew(x, t):
-        """Skew operator: 过去t天的偏度"""
-        if isinstance(x, pd.Series):
-            return x.rolling(window=t, min_periods=1).skew().fillna(0)
-        else:
-            raise TypeError("skew operator requires pandas Series")
+    def div(operand1, operand2, data_length=None, data_index=None):
+        """安全除法操作符"""
+        operand1, operand2 = Operators._align_operands(operand1, operand2)
+        return Operators.safe_divide(operand1, operand2)
 
     @staticmethod
-    def kurt(x, t):
-        """Kurt operator: 过去t天的峰度"""
-        if isinstance(x, pd.Series):
-            return x.rolling(window=t, min_periods=1).kurt().fillna(0)
-        else:
-            raise TypeError("kurt operator requires pandas Series")
+    def greater(operand1, operand2, data_length=None, data_index=None):
+        """大于比较：x > y 返回1，否则0"""
+        operand1, operand2 = Operators._align_operands(operand1, operand2)
+        return (operand1 > operand2).astype(float)
 
     @staticmethod
-    def mean(x, t):
-        """Mean operator: 过去t天的平均值"""
-        if isinstance(x, pd.Series):
-            return x.rolling(window=t, min_periods=1).mean().fillna(0)
-        else:
-            raise TypeError("mean operator requires pandas Series")
+    def less(operand1, operand2, data_length=None, data_index=None):
+        """小于比较：x < y 返回1，否则0"""
+        operand1, operand2 = Operators._align_operands(operand1, operand2)
+        return (operand1 < operand2).astype(float)
+
+    # 时序操作符=====================================
 
     @staticmethod
-    def med(x, t):
-        """Med operator: 过去t天的中位数"""
-        if isinstance(x, pd.Series):
-            return x.rolling(window=t, min_periods=1).median()
+    def _ensure_window_int(window):
+        """确保window是整数"""
+        if isinstance(window, (pd.Series, np.ndarray)):
+            window = int(window[0]) if len(window) > 0 else 5
         else:
-            raise TypeError("med operator requires pandas Series")
+            window = int(window)
+        return max(1, min(window, 100))  # 限制窗口大小
 
     @staticmethod
-    def ts_sum(x, t):
-        """Sum operator: 过去t天的总和"""
-        if isinstance(x, pd.Series):
-            return x.rolling(window=t, min_periods=1).sum()
+    def ts_ref(data, window):
+        """引用t天前的值"""
+        window = Operators._ensure_window_int(window)
+
+        if isinstance(data, pd.Series):
+            return data.shift(window)
         else:
-            raise TypeError("ts_sum operator requires pandas Series")
+            # NumPy实现
+            data = np.asarray(data)
+            result = np.zeros_like(data, dtype=np.float64)
+            result[:window] = np.nan
+            if window < len(data):
+                result[window:] = data[:-window]
+            return result
 
     @staticmethod
-    def cov(x, y, t):
-        """Cov operator: 两个特征在过去t天的协方差"""
-        if isinstance(x, pd.Series) and isinstance(y, pd.Series):
-            return x.rolling(window=t, min_periods=1).cov(y)
+    def ts_rank(data, window):
+        """窗口内排名百分位"""
+        window = Operators._ensure_window_int(window)
+
+        if isinstance(data, pd.Series):
+            def rank_in_window(x):
+                if len(x) < 2:
+                    return 0.5
+                return (x.iloc[-1] > x).sum() / len(x)
+
+            result = data.rolling(window=window, min_periods=1).apply(rank_in_window, raw=False)
+            return result.fillna(0.5)
         else:
-            raise TypeError("cov operator requires two pandas Series")
+            # NumPy实现
+            data = np.asarray(data)
+            result = np.zeros_like(data, dtype=np.float64)
+
+            for i in range(len(data)):
+                start_idx = max(0, i - window + 1)
+                window_data = data[start_idx:i + 1]
+
+                if len(window_data) < 2:
+                    result[i] = 0.5
+                else:
+                    current_val = data[i]
+                    rank = (current_val > window_data).sum() / len(window_data)
+                    result[i] = rank
+            return result
 
     @staticmethod
-    def corr(x, y, t):
-        """Corr operator: 两个特征在过去t天的相关系数"""
-        if isinstance(x, pd.Series) and isinstance(y, pd.Series):
-            return x.rolling(window=t, min_periods=1).corr(y)
+    def ts_mean(data, window):
+        """移动平均"""
+        window = Operators._ensure_window_int(window)
+
+        if isinstance(data, pd.Series):
+            result = data.rolling(window=window, min_periods=1).mean()
+            return result.bfill().fillna(0)
         else:
-            raise TypeError("corr operator requires two pandas Series")
+            # NumPy实现
+            data = np.asarray(data)
+            result = np.zeros_like(data, dtype=np.float64)
+
+            for i in range(len(data)):
+                start_idx = max(0, i - window + 1)
+                window_data = data[start_idx:i + 1]
+                result[i] = np.mean(window_data)
+            return result
+
+    @staticmethod
+    def ts_med(data, window):
+        """移动中位数"""
+        window = Operators._ensure_window_int(window)
+
+        if isinstance(data, pd.Series):
+            result = data.rolling(window=window, min_periods=1).median()
+            return result.bfill().fillna(0)
+        else:
+            # NumPy实现
+            data = np.asarray(data)
+            result = np.zeros_like(data, dtype=np.float64)
+
+            for i in range(len(data)):
+                start_idx = max(0, i - window + 1)
+                window_data = data[start_idx:i + 1]
+                result[i] = np.median(window_data)
+            return result
+
+    @staticmethod
+    def ts_sum(data, window):
+        """移动求和"""
+        window = Operators._ensure_window_int(window)
+
+        if isinstance(data, pd.Series):
+            result = data.rolling(window=window, min_periods=1).sum()
+            return result.fillna(0)
+        else:
+            # NumPy实现
+            data = np.asarray(data)
+            result = np.zeros_like(data, dtype=np.float64)
+
+            for i in range(len(data)):
+                start_idx = max(0, i - window + 1)
+                window_data = data[start_idx:i + 1]
+                result[i] = np.sum(window_data)
+            return result
+
+    @staticmethod
+    def ts_std(data, window):
+        """标准差（智能处理小窗口）"""
+        window = Operators._ensure_window_int(window)
+
+        if isinstance(data, pd.Series):
+            if window < 3:
+                diff = data.diff().abs()
+                result = diff.rolling(window=max(window, 2), min_periods=1).mean()
+                return result.fillna(0)
+            else:
+                min_periods = min(3, window)
+                result = data.rolling(window=window, min_periods=min_periods).std()
+                return result.bfill().fillna(0)
+        else:
+            # NumPy实现
+            data = np.asarray(data)
+            result = np.zeros_like(data, dtype=np.float64)
+
+            if window < 3:
+                # 小窗口：使用移动差分
+                diff = np.diff(data, prepend=data[0])
+                abs_diff = np.abs(diff)
+
+                for i in range(len(data)):
+                    start_idx = max(0, i - max(window, 2) + 1)
+                    window_diff = abs_diff[start_idx:i + 1]
+                    result[i] = np.mean(window_diff) if len(window_diff) > 0 else 0
+            else:
+                # 正常窗口
+                for i in range(len(data)):
+                    start_idx = max(0, i - window + 1)
+                    window_data = data[start_idx:i + 1]
+
+                    if len(window_data) >= 2:
+                        result[i] = np.std(window_data, ddof=1)
+                    else:
+                        if i > 0:
+                            result[i] = abs(data[i] - data[i - 1]) / np.sqrt(2)
+                        else:
+                            result[i] = 0
+            return result
+
+    @staticmethod
+    def ts_var(data, window):
+        """方差（智能处理小窗口）"""
+        window = Operators._ensure_window_int(window)
+
+        if isinstance(data, pd.Series):
+            if window < 3:
+                diff = data.diff().abs()
+                result = diff.rolling(window=max(window, 2), min_periods=1).mean()
+                return (result ** 2).fillna(0)
+            else:
+                min_periods = min(3, window)
+                result = data.rolling(window=window, min_periods=min_periods).var()
+                return result.bfill().fillna(0)
+        else:
+            # NumPy实现
+            data = np.asarray(data)
+            result = np.zeros_like(data, dtype=np.float64)
+
+            if window < 3:
+                # 小窗口：使用差分方差
+                diff = np.diff(data, prepend=data[0])
+
+                for i in range(len(data)):
+                    start_idx = max(0, i - max(window, 2) + 1)
+                    window_diff = diff[start_idx:i + 1]
+                    if len(window_diff) > 0:
+                        result[i] = np.var(window_diff)
+                    else:
+                        result[i] = 0
+            else:
+                # 正常窗口
+                for i in range(len(data)):
+                    start_idx = max(0, i - window + 1)
+                    window_data = data[start_idx:i + 1]
+
+                    if len(window_data) >= 2:
+                        result[i] = np.var(window_data, ddof=1)
+                    else:
+                        if i > 0:
+                            result[i] = ((data[i] - data[i - 1]) / np.sqrt(2)) ** 2
+                        else:
+                            result[i] = 0
+            return result
+
+    @staticmethod
+    def ts_max(data, window):
+        """移动最大值"""
+        window = Operators._ensure_window_int(window)
+
+        if isinstance(data, pd.Series):
+            result = data.rolling(window=window, min_periods=1).max()
+            return result.bfill().fillna(data.fillna(0))
+        else:
+            # NumPy实现
+            data = np.asarray(data)
+            result = np.zeros_like(data, dtype=np.float64)
+
+            for i in range(len(data)):
+                start_idx = max(0, i - window + 1)
+                window_data = data[start_idx:i + 1]
+                result[i] = np.max(window_data)
+            return result
+
+    @staticmethod
+    def ts_min(data, window):
+        """移动最小值"""
+        window = Operators._ensure_window_int(window)
+
+        if isinstance(data, pd.Series):
+            result = data.rolling(window=window, min_periods=1).min()
+            return result.bfill().fillna(data.fillna(0))
+        else:
+            # NumPy实现
+            data = np.asarray(data)
+            result = np.zeros_like(data, dtype=np.float64)
+
+            for i in range(len(data)):
+                start_idx = max(0, i - window + 1)
+                window_data = data[start_idx:i + 1]
+                result[i] = np.min(window_data)
+            return result
+
+    @staticmethod
+    def ts_skew(data, window):
+        """偏度（智能处理小窗口）"""
+        window = Operators._ensure_window_int(window)
+
+        if isinstance(data, pd.Series):
+            if window < 5:
+                return pd.Series(0, index=data.index)
+            else:
+                min_periods = min(5, window)
+                result = data.rolling(window=window, min_periods=min_periods).skew()
+                return result.fillna(0)
+        else:
+            # NumPy实现
+            data = np.asarray(data)
+            result = np.zeros_like(data, dtype=np.float64)
+
+            for i in range(len(data)):
+                if window < 5:
+                    # 小窗口：简化偏度估计
+                    start_idx = max(0, i - max(window, 3) + 1)
+                    window_data = data[start_idx:i + 1]
+
+                    if len(window_data) >= 3:
+                        mean = np.mean(window_data)
+                        std = np.std(window_data)
+
+                        if std > 1e-8:
+                            deviation = window_data - mean
+                            pos_dev = np.sum(deviation[deviation > 0])
+                            neg_dev = np.sum(np.abs(deviation[deviation < 0]))
+
+                            if pos_dev + neg_dev > 0:
+                                skew_proxy = (pos_dev - neg_dev) / (pos_dev + neg_dev)
+                                result[i] = skew_proxy * 3
+                            else:
+                                result[i] = 0
+                        else:
+                            result[i] = 0
+                    else:
+                        result[i] = 0
+                else:
+                    # 正常窗口
+                    start_idx = max(0, i - window + 1)
+                    window_data = data[start_idx:i + 1]
+
+                    if len(window_data) >= 3:
+                        try:
+                            if np.std(window_data) < 1e-10:
+                                result[i] = 0
+                            else:
+                                val = stats.skew(window_data)
+                                result[i] = 0 if not np.isfinite(val) else val
+                        except Exception:
+                            result[i] = 0
+                    else:
+                        result[i] = 0
+
+            return result
+
+    @staticmethod
+    def ts_kurt(data, window):
+        """峰度（智能处理小窗口）"""
+        window = Operators._ensure_window_int(window)
+
+        if isinstance(data, pd.Series):
+            if window < 5:
+                return pd.Series(0, index=data.index)
+            else:
+                min_periods = min(5, window)
+                result = data.rolling(window=window, min_periods=min_periods).kurt()
+                return result.fillna(0)
+        else:
+            # NumPy实现
+            data = np.asarray(data)
+            result = np.zeros_like(data, dtype=np.float64)
+
+            for i in range(len(data)):
+                if window < 5:
+                    # 小窗口：简化峰度估计
+                    start_idx = max(0, i - max(window, 3) + 1)
+                    window_data = data[start_idx:i + 1]
+
+                    if len(window_data) >= 3:
+                        mean = np.mean(window_data)
+                        std = np.std(window_data)
+
+                        if std > 1e-8:
+                            normalized = (window_data - mean) / std
+                            extreme_ratio = np.sum(np.abs(normalized) > 2) / len(normalized)
+                            result[i] = extreme_ratio * 10
+                        else:
+                            result[i] = 0
+                    else:
+                        result[i] = 0
+                else:
+                    # 正常窗口
+                    start_idx = max(0, i - window + 1)
+                    window_data = data[start_idx:i + 1]
+
+                    if len(window_data) >= 4:
+                        try:
+                            if np.std(window_data) < 1e-10:
+                                result[i] = 0
+                            else:
+                                val = stats.kurtosis(window_data, fisher=True)
+                                result[i] = 0 if not np.isfinite(val) else val
+                        except Exception:
+                            result[i] = 0
+                    else:
+                        result[i] = 0
+
+            return result
+
+    @staticmethod
+    def ts_wma(data, window):
+        """加权移动平均"""
+        window = Operators._ensure_window_int(window)
+
+        if isinstance(data, pd.Series):
+            weights = np.arange(1, window + 1, dtype=np.float64)
+
+            def weighted_mean(x):
+                x = np.asarray(x, dtype=float)
+                m = ~np.isnan(x)
+                if not m.any():
+                    return 0.0
+                x = x[m]
+                w = weights[:len(x)]
+                w = w / w.sum()
+                return float(np.dot(x, w))
+
+            return data.rolling(window=window, min_periods=1).apply(weighted_mean, raw=True)
+        else:
+            # NumPy实现
+            data = np.asarray(data)
+            result = np.zeros_like(data, dtype=np.float64)
+            full_weights = np.arange(1, window + 1, dtype=np.float64)
+
+            for i in range(len(data)):
+                start_idx = max(0, i - window + 1)
+                window_data = data[start_idx:i + 1]
+
+                if window_data.size == 0:
+                    result[i] = 0.0
+                    continue
+
+                m = ~np.isnan(window_data)
+                if not m.any():
+                    result[i] = result[i - 1] if i > 0 and np.isfinite(result[i - 1]) else 0.0
+                    continue
+
+                valid = window_data[m]
+                w = np.arange(1, len(valid) + 1, dtype=np.float64)
+                w = w / w.sum()
+                result[i] = float(np.dot(valid, w))
+
+            return result
+
+    @staticmethod
+    def ts_ema(data, window):
+        """指数移动平均"""
+        window = Operators._ensure_window_int(window)
+
+        if isinstance(data, pd.Series):
+            return data.ewm(span=window, adjust=False, min_periods=1).mean()
+        else:
+            # NumPy实现
+            data = np.asarray(data)
+            result = np.zeros_like(data, dtype=np.float64)
+            alpha = 2.0 / (window + 1)
+
+            result[0] = data[0]
+            for i in range(1, len(data)):
+                result[i] = alpha * data[i] + (1 - alpha) * result[i - 1]
+
+            return result
+
+    # ================== 三元操作符（两个数据操作数 + 窗口）===========
+    @staticmethod
+    def corr(operand1, operand2, window):
+        """相关系数"""
+        window = Operators._ensure_window_int(window)
+
+        if isinstance(operand1, pd.Series) and isinstance(operand2, pd.Series):
+            result = operand1.rolling(window=window, min_periods=2).corr(operand2)
+            return result.fillna(0)
+        else:
+            # NumPy实现
+            operand1 = np.asarray(operand1)
+            operand2 = np.asarray(operand2)
+            result = np.zeros(len(operand1))
+
+            for i in range(len(operand1)):
+                start_idx = max(0, i - window + 1)
+                if i - start_idx >= 1:  # 至少需要2个点
+                    corr = np.corrcoef(operand1[start_idx:i + 1],
+                                       operand2[start_idx:i + 1])[0, 1]
+                    result[i] = corr if not np.isnan(corr) else 0
+
+            return result
+
+    @staticmethod
+    def cov(operand1, operand2, window):
+        """协方差"""
+        window = Operators._ensure_window_int(window)
+
+        if isinstance(operand1, pd.Series) and isinstance(operand2, pd.Series):
+            result = operand1.rolling(window=window, min_periods=2).cov(operand2)
+            return result.fillna(0)
+        else:
+            # NumPy实现
+            operand1 = np.asarray(operand1)
+            operand2 = np.asarray(operand2)
+            result = np.zeros(len(operand1))
+
+            for i in range(len(operand1)):
+                start_idx = max(0, i - window + 1)
+                if i - start_idx >= 1:  # 至少需要2个点
+                    cov = np.cov(operand1[start_idx:i + 1],
+                                 operand2[start_idx:i + 1])[0, 1]
+                    result[i] = cov if not np.isnan(cov) else 0
+
+            return result
+
+
 
     @staticmethod
     def decay_linear(x, t):
@@ -176,25 +603,3 @@ class Operators:
         else:
             raise TypeError("decay_linear operator requires pandas Series")
 
-    @staticmethod
-    def wma(x, t):
-        """WMA operator: 加权移动平均"""
-        if isinstance(x, pd.Series):
-            weights = np.arange(1, t + 1)
-            weights = weights / weights.sum()
-            result = x.rolling(window=t, min_periods=1).apply(
-                lambda w: np.dot(w[~np.isnan(w)], weights[:len(w[~np.isnan(w)])])
-                if len(w[~np.isnan(w)]) > 0 else 0
-            )
-            result = result.replace([np.inf, -np.inf], np.nan)
-            return result.fillna(0)
-        else:
-            raise TypeError("wma operator requires pandas Series")
-
-    @staticmethod
-    def ema(x, t):
-        """EMA operator: 指数移动平均"""
-        if isinstance(x, pd.Series):
-            return x.ewm(span=t, adjust=False).mean()
-        else:
-            raise TypeError("ema operator requires pandas Series")

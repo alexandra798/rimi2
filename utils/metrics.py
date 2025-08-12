@@ -5,34 +5,53 @@ from scipy.stats import spearmanr, pearsonr
 
 
 def calculate_ic(predictions, targets, method='pearman'):
-    """计算信息系数(IC)；优先对齐索引，其次回退到长度截断。常数/NaN返回0.0。"""
+    """计算信息系数(IC)；对齐索引"""
     import warnings
     from scipy.stats import ConstantInputWarning, spearmanr, pearsonr
     # 索引安全对齐（两者都是 Series 时）
     if isinstance(predictions, pd.Series) and isinstance(targets, pd.Series):
-        df = pd.concat([predictions, targets], axis=1, join='inner').dropna()
-        if df.shape[0] < 2:
+        # 使用内连接对齐索引
+        df = pd.concat([predictions.rename('pred'), targets.rename('target')],
+                       axis=1, join='inner')
+        # 去除NaN
+        df = df.dropna()
+
+        if len(df) < 2:
             return 0.0
-        x = df.iloc[:, 0].values
-        y = df.iloc[:, 1].values
+
+        x = df['pred'].values
+        y = df['target'].values
     else:
-        # 原逻辑：拉平 + 截断 + 去 NaN
+        # 非Series时的原逻辑（保持向后兼容）
         if hasattr(predictions, 'values'):
             predictions = predictions.values
         if hasattr(targets, 'values'):
             targets = targets.values
+
         x = np.array(predictions).flatten()
         y = np.array(targets).flatten()
-        m = min(len(x), len(y));
-        x, y = x[:m], y[:m]
+
+        # 长度对齐
+        min_len = min(len(x), len(y))
+        x, y = x[:min_len], y[:min_len]
+
+        # 去NaN
         valid = ~(np.isnan(x) | np.isnan(y))
         if valid.sum() < 2:
             return 0.0
         x, y = x[valid], y[valid]
+    # 常数检测
+    if np.std(x) < 1e-10 or np.std(y) < 1e-10:
+        return 0.0
+
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=ConstantInputWarning)
-        corr, _ = (pearsonr(x, y) if method == 'pearson' else spearmanr(x, y))
-    return corr if not np.isnan(corr) else 0.0
+        if method == 'pearson':
+            corr, _ = pearsonr(x, y)
+        else:
+            corr, _ = spearmanr(x, y)
+
+    return float(corr) if not np.isnan(corr) else 0.0
 
 
 def calculate_sharpe_ratio(returns, risk_free_rate=0.0, periods=252):

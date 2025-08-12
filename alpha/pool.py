@@ -1,5 +1,6 @@
 # alpha/pool.py 完整修复版
 import numpy as np
+import pandas as pd
 from sklearn.linear_model import LinearRegression
 import logging
 from scipy.stats import pearsonr
@@ -119,12 +120,24 @@ class AlphaPool:
             y_data: 目标数据
             evaluate_formula: 公式评估函数
         """
-        logger.info(f"Updating alpha pool with {len(self.alphas)} formulas...")
+        import hashlib
 
-        # 1. 评估所有没有values的alpha
+        if isinstance(X_data, pd.DataFrame):
+            context_id = hashlib.md5(X_data.index.values.tobytes()).hexdigest()[:8]
+        else:
+            context_id = "unknown"
+
+        logger.info(f"Updating alpha pool with context {context_id}, {len(self.alphas)} formulas...")
+
         alphas_to_remove = []
 
+
         for i, alpha in enumerate(self.alphas):
+            if 'context_id' in alpha and alpha['context_id'] != context_id:
+                # 上下文不匹配，需要重新评估
+                alpha['values'] = None
+                alpha['context_id'] = context_id
+
             if 'values' not in alpha or alpha['values'] is None:
                 try:
                     alpha['values'] = evaluate_formula.evaluate(
@@ -132,6 +145,7 @@ class AlphaPool:
                         X_data,
                         allow_partial=False
                     )
+                    alpha['context_id'] = context_id  # 记录上下文
 
                     # 检查有效性
                     if not self.is_valid_alpha(alpha['values']):

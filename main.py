@@ -20,6 +20,7 @@ from data.data_loader import (
 )
 from alpha.pool import AlphaPool
 from alpha.evaluator import FormulaEvaluator
+from mcts import trainer
 from validation.cross_validation import cross_validate_formulas
 from validation.backtest import backtest_formulas
 from mcts.trainer import RiskMinerTrainer
@@ -50,7 +51,7 @@ def _preprocess_for_mcts(X: pd.DataFrame) -> pd.DataFrame:
 
 def run_mcts_with_token_system(X_train, y_train, num_iterations=200,
                                use_policy_network=True, num_simulations=50,
-                               device=None):
+                               device=None, random_seed=42):
     """
     使用新的Token系统运行MCTS
 
@@ -69,7 +70,7 @@ def run_mcts_with_token_system(X_train, y_train, num_iterations=200,
     logger.info(f"Data size: {len(X_train)} rows")
 
     # 创建训练器
-    trainer = RiskMinerTrainer(X_train, y_train, device=device, use_sampling=True)
+    trainer = RiskMinerTrainer(X_train, y_train, device=device, use_sampling=True, random_seed=random_seed)
 
     # 训练
     trainer.train(
@@ -97,14 +98,12 @@ def run_mcts_with_token_system(X_train, y_train, num_iterations=200,
 
 
 def main(args):
-    """主函数"""
     logger.info("Starting RiMi Algorithm")
 
-    # 判断使用哪个系统
     if args.use_token_system:
         logger.info("=== Using Token-based RPN System ===")
     else:
-        logger.info("=== Using Legacy String-based System ===")
+        logger.info("=== Using Legacy System ===")
 
     # 设置GPU设备
     if torch.cuda.is_available():
@@ -175,7 +174,8 @@ def main(args):
             X_train_mcts, y_train,
             num_iterations=MCTS_CONFIG['num_iterations'],
             num_simulations=50,
-            device=device
+            device=device,
+            random_seed=42
         )
     else:
         logger.info("Using Token system without Policy Network")
@@ -198,8 +198,16 @@ def main(args):
                 'ic': score
             })
 
-        alpha_pool.update_pool(X_train_mcts, y_train, evaluate_formula)  # <-- 用预处理后的 X
+        # 使用与训练相同的采样集更新池
+        if args.use_risk_seeking and hasattr(trainer, 'X_train_sample'):
+            # 如果MCTS使用了采样，池更新也用相同的采样集
+            X_pool_update = _preprocess_for_mcts(trainer.X_train_sample)
+            y_pool_update = trainer.y_train
+        else:
+            X_pool_update = X_train_mcts
+            y_pool_update = y_train
 
+        alpha_pool.update_pool(X_pool_update, y_pool_update, evaluate_formula)
 
     top_formulas = alpha_pool.get_top_formulas(5)
 
@@ -263,7 +271,7 @@ def main(args):
         logger.info(f"Saving results to {results_path}")
         with open(results_path, 'w', encoding='utf-8') as f:
             f.write("=== Top Alpha Formulas ===\n")
-            f.write(f"System: {'Token-based RPN' if args.use_token_system else 'Legacy String-based'}\n")
+            f.write(f"System: {'Token-based RPN' if args.use_token_system else 'Legacy'}\n")
             f.write(f"Risk Seeking: {args.use_risk_seeking}\n\n")
 
             for i, formula in enumerate(top_formulas, 1):
@@ -350,6 +358,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Force continue even if data quality check fails"
     )
-
+    parser.add_argument(
+        "--random_seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducible sampling"
+    )
     args = parser.parse_args()
     main(args)

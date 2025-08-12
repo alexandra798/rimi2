@@ -16,17 +16,18 @@ class RewardCalculator:
     """
 
     def __init__(self, alpha_pool, lambda_param=0.1, sample_size=5000,
-                 pool_size=100, min_std=1e-6):
+                 pool_size=100, min_std=1e-6, random_seed=42):
         self.alpha_pool = alpha_pool
         self.lambda_param = lambda_param
         self.sample_size = sample_size
         self.pool_size = pool_size
         self.min_std = min_std  # 新增：最小标准差阈值
+        self.random_seed = random_seed  # 保存seed
         self.formula_evaluator = FormulaEvaluator()
         self._cache = {}
-
-        # 新增：统计信息
         self.constant_penalty_count = 0
+
+        self.rng = np.random.RandomState(random_seed)
 
     def is_nearly_constant(self, values):
         """检查值是否接近常数"""
@@ -44,7 +45,29 @@ class RewardCalculator:
         std = np.std(valid_values)
         return std < self.min_std
 
+    def _build_design_matrix(self, formulas, X_ctx, y_ctx):
+        """构建设计矩阵时确保数据对齐"""
+        cols = []
+        for f in formulas:
+            s = self.formula_evaluator.evaluate(f, X_ctx, allow_partial=False)
+            if s is None:
+                continue
+            if not isinstance(s, pd.Series):
+                s = pd.Series(np.asarray(s).reshape(-1), index=X_ctx.index)
+            s = s.replace([np.inf, -np.inf], np.nan).rename(f)
+            cols.append(s)
 
+        if not cols:
+            return None, None
+
+        # 使用内连接确保所有数据对齐
+        df = pd.concat(cols + [y_ctx.rename('_y')], axis=1, join='inner').dropna()
+        if df.shape[0] < 50 or df.shape[1] <= 1:
+            return None, None
+
+        X_mat = df.drop(columns=['_y']).to_numpy()
+        y_vec = df['_y'].to_numpy()
+        return X_mat, y_vec
 
     def calculate_intermediate_reward(self, state, X_data, y_data):
         cache_key = ' '.join([t.name for t in state.token_sequence])
@@ -58,7 +81,7 @@ class RewardCalculator:
         try:
             # 采样数据
             if len(X_data) > self.sample_size:
-                sample_indices = np.random.choice(len(X_data), self.sample_size, replace=False)
+                sample_indices = self.rng.choice(len(X_data), self.sample_size, replace=False)
                 X_sample = X_data.iloc[sample_indices] if hasattr(X_data, 'iloc') else X_data[sample_indices]
                 y_sample = y_data.iloc[sample_indices] if hasattr(y_data, 'iloc') else y_data[sample_indices]
             else:
@@ -68,14 +91,21 @@ class RewardCalculator:
             # 评估
             alpha_values = self.formula_evaluator.evaluate_state(state, X_sample)
 
-            if alpha_values is None:
-                result = -0.1
+            if alpha_values is None or alpha_values.isna().all():
+                return -0.1
             else:
                 # 新增：检查是否为常数
-                if self.is_nearly_constant(alpha_values):
-                    self.constant_penalty_count += 1
-                    logger.debug(f"Constant alpha detected in intermediate state: {cache_key[:50]}...")
-                    result = -1.0  # 严厉惩罚常数因子
+                valid_values = alpha_values.dropna()
+                if len(valid_values) > 10:
+                    std = valid_values.std()
+                    unique_ratio = len(valid_values.unique()) / len(valid_values)
+
+                    # 多重检测
+                    if std < self.min_std or unique_ratio < 0.01:
+                        self.constant_penalty_count += 1
+                        logger.debug(f"Constant alpha in intermediate state (std={std:.8f}, unique={unique_ratio:.2%})")
+                        return -1.0  # 严厉惩罚
+
                 else:
                     # 计算IC
                     ic = self.calculate_ic(alpha_values, y_sample)
@@ -185,84 +215,63 @@ class RewardCalculator:
 
 
     def calculate_ic(self, predictions, targets):
-        """计算IC（Pearson相关系数"""
+        """计算IC（Pearson相关系数）-使用pandas对齐"""
         try:
-            # 处理predictions
-            if hasattr(predictions, 'values'):
-                predictions = predictions.values
-            if hasattr(targets, 'values'):
-                targets = targets.values
+            # 转为Series（如果不是）
+            if not isinstance(predictions, pd.Series):
+                if hasattr(predictions, 'values'):
+                    predictions = pd.Series(predictions.values)
+                else:
+                    predictions = pd.Series(np.array(predictions).flatten())
 
-            # 确保是numpy数组
-            predictions = np.array(predictions).flatten()
-            targets = np.array(targets).flatten()
+            if not isinstance(targets, pd.Series):
+                if hasattr(targets, 'values'):
+                    targets = pd.Series(targets.values)
+                else:
+                    targets = pd.Series(np.array(targets).flatten())
 
-            # 检查长度
-            if len(predictions) == 1 and len(targets) > 1:
-                # predictions是标量，扩展为向量
-                predictions = np.full(len(targets), predictions[0])
-            elif len(targets) == 1 and len(predictions) > 1:
-                # targets是标量（不应该发生）
-                logger.error("Targets is scalar, this should not happen")
-                return 0.0
-            elif len(predictions) != len(targets):
-                # 长度不匹配，取最小长度
-                min_len = min(len(predictions), len(targets))
-                predictions = predictions[:min_len]
-                targets = targets[:min_len]
+            # ===== 使用pandas对齐 =====
+            df = pd.concat([predictions.rename('pred'), targets.rename('target')],
+                           axis=1, join='inner')
+            df = df.replace([np.inf, -np.inf], np.nan).dropna()
 
-            # 移除NaN
-            valid_mask = ~(np.isnan(predictions) | np.isnan(targets))
-            if valid_mask.sum() < 2:
+            if len(df) < 2:
                 return 0.0
 
-            # 检查是否为常数
-            if np.std(predictions[valid_mask]) < 1e-10:
-                logger.debug("Predictions are nearly constant")
-                return 0.0
-            if np.std(targets[valid_mask]) < 1e-10:
-                logger.debug("Targets are nearly constant")
+            # 常数检测
+            if df['pred'].std() < self.min_std or df['target'].std() < self.min_std:
+                logger.debug("IC calculation skipped: constant values detected")
                 return 0.0
 
-            corr, _ = pearsonr(predictions[valid_mask], targets[valid_mask])
-            return corr if not np.isnan(corr) else 0.0
-
+            corr, _ = pearsonr(df['pred'], df['target'])
+            return float(corr) if not np.isnan(corr) else 0.0
 
         except Exception as e:
             logger.error(f"Error calculating IC: {e}")
             return 0.0
 
     def _calculate_mutual_ic(self, alpha1_values, alpha2_values):
-        """计算两个alpha的相互IC；对近常数/样本不足短路为0，避免SciPy警告与不稳定信号"""
+        """计算两个alpha的相互IC"""
         try:
-            # 转成扁平 ndarray
-            if hasattr(alpha1_values, 'values'):
-                alpha1_values = alpha1_values.values
-            if hasattr(alpha2_values, 'values'):
-                alpha2_values = alpha2_values.values
+            # 转为Series
+            if not isinstance(alpha1_values, pd.Series):
+                alpha1_values = pd.Series(getattr(alpha1_values, 'values', alpha1_values))
+            if not isinstance(alpha2_values, pd.Series):
+                alpha2_values = pd.Series(getattr(alpha2_values, 'values', alpha2_values))
 
-            alpha1 = np.asarray(alpha1_values, dtype=float).ravel()
-            alpha2 = np.asarray(alpha2_values, dtype=float).ravel()
+            # ===== 使用pandas对齐 =====
+            df = pd.concat([alpha1_values.rename('a1'), alpha2_values.rename('a2')],
+                           axis=1, join='inner')
+            df = df.replace([np.inf, -np.inf], np.nan).dropna()
 
-            # 对齐长度
-            L = int(min(len(alpha1), len(alpha2)))
-            alpha1 = alpha1[:L]
-            alpha2 = alpha2[:L]
-
-            # 去 NaN
-            valid = ~(np.isnan(alpha1) | np.isnan(alpha2))
-            if valid.sum() < 2:
+            if len(df) < 2:
                 return 0.0
 
-            a1 = alpha1[valid]
-            a2 = alpha2[valid]
-
-            # 近常数短路（与 self.min_std 一致）
-            if np.std(a1) < getattr(self, 'min_std', 1e-6) or np.std(a2) < getattr(self, 'min_std', 1e-6):
+            # 常数检测
+            if df['a1'].std() < self.min_std or df['a2'].std() < self.min_std:
                 return 0.0
 
-            # 计算 Pearson 相关（mutIC）
-            corr, _ = pearsonr(a1, a2)
+            corr, _ = pearsonr(df['a1'], df['a2'])
             return float(corr) if not np.isnan(corr) else 0.0
 
         except Exception as e:
@@ -293,21 +302,3 @@ class RewardCalculator:
         pred = self.linear_model.predict(X_mat)
         return float(calculate_ic(pred, y_vec))
 
-    def _build_design_matrix(self, formulas, X_data: pd.DataFrame, y_data: pd.Series):
-        cols = []
-        for f in formulas:
-            s = self.formula_evaluator.evaluate(f, X_data, allow_partial=False)
-            if s is None:
-                continue
-            if not isinstance(s, pd.Series):
-                s = pd.Series(np.asarray(s).reshape(-1), index=X_data.index)
-            s = s.replace([np.inf, -np.inf], np.nan).rename(f)
-            cols.append(s)
-        if not cols:
-            return None, None
-        df = pd.concat(cols + [y_data.rename('_y')], axis=1, join='inner').dropna()
-        if df.shape[0] < 50 or df.shape[1] <= 1:
-            return None, None
-        X_mat = df.drop(columns=['_y']).to_numpy()
-        y_vec = df['_y'].to_numpy()
-        return X_mat, y_vec
