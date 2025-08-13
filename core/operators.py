@@ -25,7 +25,8 @@ class Operators:
     def safe_divide(x, y, default_value=0):
         """安全除法函数，避免除零错误"""
         if isinstance(x, pd.Series):
-            return x.div(y).replace([np.inf, -np.inf], 0).fillna(default_value)
+            # 修复：将无穷大也替换为 default_value
+            return x.div(y).replace([np.inf, -np.inf], default_value).fillna(default_value)
         else:
             return np.divide(x, y, out=np.full_like(x, default_value, dtype=float), where=y != 0)
 

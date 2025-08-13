@@ -54,7 +54,7 @@ class MDPState:
     def copy(self):
         """深拷贝状态"""
         new_state = MDPState()
-        new_state.token_sequence = self.token_sequence.copy()
+        new_state.token_sequence = self.token_sequence.copy()  # Create a shallow copy of the list
         new_state.step_count = self.step_count
         new_state.stack_size = self.stack_size
         return new_state

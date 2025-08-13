@@ -190,7 +190,7 @@ class RPNValidator:
 
 
         # END
-        if stack_size == 1 and len(token_sequence) > 3:
+        if stack_size == 1 and len(token_sequence) >= 2:
             valid_tokens.append('END')
 
         return valid_tokens

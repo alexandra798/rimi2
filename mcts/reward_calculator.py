@@ -96,6 +96,7 @@ class RewardCalculator:
             else:
                 # 新增：检查是否为常数
                 valid_values = alpha_values.dropna()
+
                 if len(valid_values) > 10:
                     std = valid_values.std()
                     unique_ratio = len(valid_values.unique()) / len(valid_values)
@@ -106,45 +107,44 @@ class RewardCalculator:
                         logger.debug(f"Constant alpha in intermediate state (std={std:.8f}, unique={unique_ratio:.2%})")
                         return -1.0  # 严厉惩罚
 
+
+                # 计算IC
+                ic = self.calculate_ic(alpha_values, y_sample)
+
+                # 额外奖励高变异性的因子
+                if hasattr(alpha_values, 'values'):
+                    values = alpha_values.values
                 else:
-                    # 计算IC
-                    ic = self.calculate_ic(alpha_values, y_sample)
+                    values = np.array(alpha_values)
 
-                    # 额外奖励高变异性的因子
-                    if hasattr(alpha_values, 'values'):
-                        values = alpha_values.values
-                    else:
-                        values = np.array(alpha_values)
+                valid_values_for_bonus = values[~np.isnan(values)]
+                if len(valid_values_for_bonus) > 0:
+                    std = np.std(valid_values_for_bonus)
+                    diversity_bonus = np.log(1 + std) * 0.1
+                else:
+                    diversity_bonus = 0
 
-                    valid_values = values[~np.isnan(values)]
-                    if len(valid_values) > 0:
-                        std = np.std(valid_values)
-                        # 变异性奖励（对数尺度）
-                        diversity_bonus = np.log(1 + std) * 0.1
-                    else:
-                        diversity_bonus = 0
+                # 计算mutIC
+                if len(self.alpha_pool) > 0:
+                    mut_ic_sum = 0
+                    valid_count = 0
+                    for alpha in self.alpha_pool[:10]:
+                        if 'values' in alpha:
+                            alpha_sample_values = self.formula_evaluator.evaluate(
+                                alpha['formula'], X_sample
+                            )
+                            mut_ic = self._calculate_mutual_ic(alpha_values, alpha_sample_values)
+                            if not np.isnan(mut_ic):
+                                mut_ic_sum += abs(mut_ic)
+                                valid_count += 1
 
-                    # 计算mutIC
-                    if len(self.alpha_pool) > 0:
-                        mut_ic_sum = 0
-                        valid_count = 0
-                        for alpha in self.alpha_pool[:10]:
-                            if 'values' in alpha:
-                                alpha_sample_values = self.formula_evaluator.evaluate(
-                                    alpha['formula'], X_sample
-                                )
-                                mut_ic = self._calculate_mutual_ic(alpha_values, alpha_sample_values)
-                                if not np.isnan(mut_ic):
-                                    mut_ic_sum += abs(mut_ic)
-                                    valid_count += 1
-
-                        if valid_count > 0:
-                            avg_mut_ic = mut_ic_sum / valid_count
-                            result = ic - self.lambda_param * avg_mut_ic + diversity_bonus
-                        else:
-                            result = ic + diversity_bonus
+                    if valid_count > 0:
+                        avg_mut_ic = mut_ic_sum / valid_count
+                        result = ic - self.lambda_param * avg_mut_ic + diversity_bonus
                     else:
                         result = ic + diversity_bonus
+                else:
+                    result = ic + diversity_bonus
 
             # 缓存结果
             self._cache[cache_key] = result

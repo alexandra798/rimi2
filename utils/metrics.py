@@ -56,15 +56,21 @@ def calculate_ic(predictions, targets, method='pearman'):
 
 def calculate_sharpe_ratio(returns, risk_free_rate=0.0, periods=252):
     arr = np.asarray(getattr(returns, 'values', returns), dtype=float).ravel()
+
     rf = risk_free_rate / periods
     arr = arr - rf
     arr = arr[np.isfinite(arr)]
     if arr.size < 2:
         return 0.0
+
     mu = np.nanmean(arr)
     sigma = np.nanstd(arr, ddof=1)
-    if sigma == 0 or not np.isfinite(sigma):
+
+    if sigma < 1e-10 or not np.isfinite(sigma):
         return 0.0
+    sharpe = float(np.sqrt(periods) * mu / sigma)
+    if abs(sharpe) > 100:  # 异常高的夏普比率
+        return np.sign(sharpe) * 100  # 截断到合理范围
     return float(np.sqrt(periods) * mu / sigma)
 
 
@@ -72,6 +78,8 @@ def calculate_sharpe_ratio(returns, risk_free_rate=0.0, periods=252):
 def calculate_max_drawdown(cumulative_returns):
     """最大回撤，分母做零保护。"""
     cr = np.asarray(cumulative_returns, dtype=float)
+    if len(cr) == 0:
+        return 0.0
     running_max = np.maximum.accumulate(cr)
     running_max = np.where(running_max == 0.0, 1e-12, running_max)
     drawdown = (cr - running_max) / running_max

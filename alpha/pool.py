@@ -45,6 +45,16 @@ class AlphaPool:
             values = alpha_values.values
         else:
             values = np.array(alpha_values)
+        
+        # 检查是否为空
+        if len(values) == 0:
+            return False
+        
+        # 确保是数值类型
+        try:
+            values = np.array(values, dtype=np.float64)
+        except (ValueError, TypeError):
+            return False
 
         # 移除NaN
         valid_values = values[~np.isnan(values)]
