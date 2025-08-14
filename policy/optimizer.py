@@ -32,11 +32,13 @@ class RiskSeekingOptimizer:
         self.quantile_estimate += self.beta * (1 - self.quantile_alpha - indicator)
         return self.quantile_estimate
 
-    def train_on_episode(self, episode_trajectory):
+    def train_on_episode(self, episode_trajectory, gamma=None):
         """
         使用一个episode的轨迹训练策略网络
         Args: episode_trajectory: [(state, action, reward), ...] 列表
         """
+        if gamma is None:
+            gamma = self.gamma
         # 计算episode总奖励
         total_reward = sum([r for _, _, r in episode_trajectory])
         # 更新分位数估计
@@ -94,7 +96,7 @@ class RiskSeekingOptimizer:
             returns = []
             G = 0.0
             for r in reversed(rewards):
-                G = r + 0.99 * G  # 折扣因子0.99
+                G = r + gamma * G
                 returns.insert(0, G)
             returns_tensor = torch.as_tensor(returns, dtype=torch.float32, device=self.device)
 
