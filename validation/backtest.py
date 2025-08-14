@@ -1,4 +1,4 @@
-"""回测模块 - 修复版"""
+"""回测模块 - validation/backtest.py"""
 import pandas as pd
 import numpy as np
 from scipy.stats import spearmanr

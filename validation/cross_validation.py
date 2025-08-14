@@ -1,4 +1,4 @@
-"""交叉验证模块"""
+"""交叉验证模块 validation/cross_validation.py"""
 import numpy as np
 from sklearn.model_selection import TimeSeriesSplit
 from scipy.stats import spearmanr

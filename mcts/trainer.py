@@ -150,6 +150,7 @@ class RiskMinerTrainer:
         current = root
         max_depth = 30
         depth = 0
+        from core import RPNValidator
 
         while current.children and not current.is_terminal() and depth < max_depth:
             # 选择访问次数最多的子节点
@@ -175,19 +176,52 @@ class RiskMinerTrainer:
                     best_child.state, self.X_train_sample, self.y_train_sample
                 )
 
+            valid_now = RPNValidator.get_valid_next_tokens(current.state.token_sequence)
+            if best_action not in valid_now:
+                # 不要把非法 (state, action) 放入轨迹
+                break
+
             trajectory.append((current.state, best_action, reward))
             current = best_child
             depth += 1
 
         if not current.is_terminal() and depth < max_depth:
-            # 强制终止：补齐 END 并显式计算终止奖励
-            terminal_state = current.state.copy()
-            terminal_state.add_token('END')
-            terminal_reward = self.reward_calculator.calculate_terminal_reward(
-                terminal_state, self.X_train_sample, self.y_train_sample
-            )
+            # 检查是否可以直接添加END
 
-            trajectory.append((current.state, 'END', terminal_reward))
+            valid_actions = RPNValidator.get_valid_next_tokens(current.state.token_sequence)
+
+            if 'END' in valid_actions:
+                # 可以直接添加END
+                terminal_state = current.state.copy()
+                terminal_state.add_token('END')
+                terminal_reward = self.reward_calculator.calculate_terminal_reward(
+                    terminal_state, self.X_train_sample, self.y_train_sample
+                )
+                trajectory.append((current.state, 'END', terminal_reward))
+            else:
+                # 不能直接添加END，需要先补充必要的token
+                # 检查是否需要delta参数
+                if valid_actions and all(a.startswith('delta_') for a in valid_actions):
+                    # 需要delta参数，选择一个默认的
+                    default_delta = 'delta_5'  # 或选择第一个有效的delta
+                    if default_delta in valid_actions:
+                        delta_state = current.state.copy()
+                        delta_state.add_token(default_delta)
+
+                        # 添加delta步骤
+                        delta_reward = self.reward_calculator.calculate_intermediate_reward(
+                            delta_state, self.X_train_sample, self.y_train_sample
+                        )
+                        trajectory.append((current.state, default_delta, delta_reward))
+
+                        # 现在可以添加END了
+                        terminal_state = delta_state.copy()
+                        terminal_state.add_token('END')
+                        terminal_reward = self.reward_calculator.calculate_terminal_reward(
+                            terminal_state, self.X_train_sample, self.y_train_sample
+                        )
+                        trajectory.append((delta_state, 'END', terminal_reward))
+                # 如果还是不能终止，就不强制添加END，返回当前轨迹
 
         return trajectory
 

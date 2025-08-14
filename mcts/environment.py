@@ -27,12 +27,10 @@ class MDPState:
         self.token_sequence.append(token)
         self.step_count += 1
 
-        # 更新栈大小
-        if token.type == TokenType.OPERAND:
-            if not token.name.startswith('delta_'):
-                self.stack_size += 1
-        elif token.type == TokenType.OPERATOR:
-            self.stack_size = self.stack_size - token.arity + 1
+        # 更新栈大小 —— 以解析器为唯一真源，防止 arity 不一致导致栈错位
+        from core import RPNValidator  # 顶部已导入则可去掉此行
+        self.stack_size = RPNValidator.calculate_stack_size(self.token_sequence)
+
 
     def encode_for_network(self):
         """编码状态用于神经网络输入"""
@@ -145,9 +143,13 @@ class AlphaMiningMDP:
         actions = [a for a in actions
                    if not (TOKEN_DEFINITIONS[a].type == TokenType.OPERAND and counts.get(a, 0) >= 3)]
 
-        # 兜底
         if not actions:
-            return ['END']
+            # 回退到语法层的原始动作集合（永不发明 END）
+            actions = base_actions
+
+        if not actions:
+            return []
+
         return actions
 
     def is_stack_top_constant(self, state):

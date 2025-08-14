@@ -1,4 +1,4 @@
-"""Token系统和RPN验证器"""
+"""core/token_system.py"""
 from enum import Enum
 import numpy as np
 
@@ -87,8 +87,8 @@ TOKEN_DEFINITIONS = {
     'ts_ema': Token(TokenType.OPERATOR, 'ts_ema', arity=1, min_window=2),
 
     # 相关性操作符
-    'corr': Token(TokenType.OPERATOR, 'corr', arity=3, min_window=3),
-    'cov': Token(TokenType.OPERATOR, 'cov', arity=3, min_window=3),
+    'corr': Token(TokenType.OPERATOR, 'corr', arity=2, min_window=3),
+    'cov': Token(TokenType.OPERATOR, 'cov', arity=2, min_window=3),
 }
 
 # 创建Token索引映射

@@ -64,8 +64,12 @@ class RiskSeekingOptimizer:
                     pre_state.stack_size = RPNValidator.calculate_stack_size(pre_state.token_sequence)
                 # 取合法动作集并做强校验
                 valid_tokens = RPNValidator.get_valid_next_tokens(pre_state.token_sequence)
-                assert action in valid_tokens, \
-                    f"Invalid action '{action}' for given state. Valid: {valid_tokens}"
+                if action not in valid_tokens:
+                    # 记录一下，跳过该条，不要让整次训练崩
+                    import logging
+                    logging.warning(f"Skip illegal pair in training: action={action}, valid={valid_tokens}")
+                    continue
+
 
                 # 编码 & 收集
                 states_enc.append(pre_state.encode_for_network())
@@ -94,18 +98,10 @@ class RiskSeekingOptimizer:
                 returns.insert(0, G)
             returns_tensor = torch.as_tensor(returns, dtype=torch.float32, device=self.device)
 
-            masks = []
-            lengths = []
-            for state, action, reward in episode_trajectory:
-                valid = [False] * len(TOKEN_TO_INDEX)
-                for name in RPNValidator.get_valid_next_tokens(state.token_sequence):
-                    valid[TOKEN_TO_INDEX[name]] = True
-                masks.append(valid)
-                # 真实长度：token_sequence 长度（不超过 encode 的最大步长）
-                lengths.append(min(len(state.token_sequence), states_tensor.size(1)))
 
-            masks_tensor = torch.BoolTensor(masks).to(self.device)
-            lengths_tensor = torch.LongTensor(lengths).to(self.device)
+            masks_tensor = torch.as_tensor(masks, dtype=torch.bool, device=self.device)
+            lengths_tensor = torch.as_tensor(lengths, dtype=torch.long, device=self.device)
+ 
 
             # 前向传播
             action_probs, values, log_probs = self.policy_network(

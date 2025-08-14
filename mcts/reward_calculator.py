@@ -29,6 +29,13 @@ class RewardCalculator:
 
         self.rng = np.random.RandomState(random_seed)
 
+    def _finite_series(x, index=None):
+        import numpy as np
+        import pandas as pd
+        s = pd.Series(x if not hasattr(x, 'values') else x.values, index=index)
+        s = s.replace([np.inf, -np.inf], np.nan)
+        return s[np.isfinite(s)]
+
     def is_nearly_constant(self, values):
         """检查值是否接近常数"""
         if values is None:
@@ -74,12 +81,10 @@ class RewardCalculator:
         if cache_key in self._cache:
             return self._cache[cache_key]
 
-        # 检查是否为合法的部分表达式
         if not RPNValidator.is_valid_partial_expression(state.token_sequence):
             return -0.1
 
         try:
-            # 采样数据
             if len(X_data) > self.sample_size:
                 sample_indices = self.rng.choice(len(X_data), self.sample_size, replace=False)
                 X_sample = X_data.iloc[sample_indices] if hasattr(X_data, 'iloc') else X_data[sample_indices]

@@ -20,7 +20,6 @@ from data.data_loader import (
 )
 from alpha.pool import AlphaPool
 from alpha.evaluator import FormulaEvaluator
-from mcts import trainer
 from validation.cross_validation import cross_validate_formulas
 from validation.backtest import backtest_formulas
 from mcts.trainer import RiskMinerTrainer
@@ -54,7 +53,6 @@ def run_mcts_with_token_system(X_train, y_train, num_iterations=200,
                                device=None, random_seed=42):
     """
     使用新的Token系统运行MCTS
-
     Args:
         X_train: 训练数据特征
         y_train: 训练数据标签
@@ -64,7 +62,9 @@ def run_mcts_with_token_system(X_train, y_train, num_iterations=200,
         device: torch设备(cuda或cpu)
 
     Returns:
-        top_formulas: 最佳公式列表
+        (top_formulas, trainer):
+        top_formulas 为 [(formula, ic/score), ...]
+        trainer 为 RiskMinerTrainer 实例（含 X_train_sample / y_train 等）
     """
     logger.info("Starting MCTS with Token System")
     logger.info(f"Data size: {len(X_train)} rows")
@@ -94,7 +94,7 @@ def run_mcts_with_token_system(X_train, y_train, num_iterations=200,
         else:
             result.append((formula, 0.0))
 
-    return result
+    return result, trainer
 
 
 def main(args):
@@ -125,21 +125,16 @@ def main(args):
     X, y, all_features = load_user_dataset(args.data_path, args.target_column)
     logger.info(f"Initial data shape: X={X.shape}, y={y.shape}")
 
-    # 检查初始缺失值
     check_missing_values(X, 'initial')
 
-    # 步骤1：清理target=0的样本（区分停牌和正常交易）
     logger.info("Step 1: Cleaning target=0 samples (removing suspensions)...")
     X, y = clean_target_zeros(X, y)
 
-    # 步骤2：处理缺失值（使用混合策略）
     logger.info("Step 2: Handling missing values with mixed strategy...")
     X = handle_missing_values(X, strategy='mixed')
 
-    # 步骤3：再次检查并确保没有缺失值
     check_missing_values(X, 'after_handling')
 
-    # 步骤4：验证数据质量
     logger.info("Step 3: Validating data quality...")
     is_valid, issues = validate_data_quality(X, y)
 
@@ -170,7 +165,7 @@ def main(args):
 
     if args.use_risk_seeking:
         logger.info("Using Token system with Risk Seeking Policy Network")
-        best_formulas_quantile = run_mcts_with_token_system(
+        best_formulas_quantile, trainer = run_mcts_with_token_system(
             X_train_mcts, y_train,
             num_iterations=MCTS_CONFIG['num_iterations'],
             num_simulations=50,
@@ -179,7 +174,7 @@ def main(args):
         )
     else:
         logger.info("Using Token system without Policy Network")
-        best_formulas_quantile = []
+        best_formulas_quantile, trainer = [], None
 
     evaluate_formula = FormulaEvaluator()
 

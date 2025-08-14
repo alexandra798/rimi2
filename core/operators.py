@@ -1,4 +1,4 @@
-"""所有操作符的集中实现"""
+"""core/operators.py"""
 import numpy as np
 import pandas as pd
 import logging
