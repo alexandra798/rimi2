@@ -224,16 +224,16 @@ class Operators:
 
         if isinstance(data, pd.Series):
             result = data.rolling(window=window, min_periods=1).sum()
+            result = result.clip(lower=-1e10, upper=1e10)
             return result.fillna(0)
         else:
-            # NumPy实现
             data = np.asarray(data)
             result = np.zeros_like(data, dtype=np.float64)
 
             for i in range(len(data)):
                 start_idx = max(0, i - window + 1)
                 window_data = data[start_idx:i + 1]
-                result[i] = np.sum(window_data)
+                result[i] = np.clip(np.sum(window_data), -1e10, 1e10)
             return result
 
     @staticmethod

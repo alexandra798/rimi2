@@ -236,6 +236,7 @@ class RewardCalculator:
                     targets = pd.Series(np.array(targets).flatten())
 
             # ===== 使用pandas对齐 =====
+
             df = pd.concat([predictions.rename('pred'), targets.rename('target')],
                            axis=1, join='inner')
             df = df.replace([np.inf, -np.inf], np.nan).dropna()
@@ -249,6 +250,7 @@ class RewardCalculator:
                 return 0.0
 
             corr, _ = pearsonr(df['pred'], df['target'])
+
             return float(corr) if not np.isnan(corr) else 0.0
 
         except Exception as e:

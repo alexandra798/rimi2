@@ -37,14 +37,17 @@ def _preprocess_for_mcts(X: pd.DataFrame) -> pd.DataFrame:
     Xp = X.copy()
     # 保险起见：若存在极少数负值（数据清洗瑕疵），先截到 0
     numeric_cols = Xp.select_dtypes(include=[np.number]).columns
-    Xp[numeric_cols] = np.clip(Xp[numeric_cols], a_min=0, a_max=None)
+    Xp[numeric_cols] = np.clip(Xp[numeric_cols], a_min=0, a_max=1e6)
     # log1p
     Xp[numeric_cols] = np.log1p(Xp[numeric_cols])
+
+    Xp[numeric_cols] = np.clip(Xp[numeric_cols], -10, 20)
     # z-score（按列）
     mean = Xp[numeric_cols].mean(axis=0)
     std = Xp[numeric_cols].std(axis=0)
     std_safe = std.replace(0, 1.0)  # 防 0
     Xp[numeric_cols] = (Xp[numeric_cols] - mean) / std_safe
+    Xp[numeric_cols] = np.clip(Xp[numeric_cols], -5, 5)
     return Xp
 
 

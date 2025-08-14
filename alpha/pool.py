@@ -290,6 +290,7 @@ class AlphaPool:
         col_std_safe = np.where(col_std < eps, 1.0, col_std)  # 防 0
         X_clean = (X_clean - col_mean) / col_std_safe
 
+        X_clean = np.clip(X_clean, -10, 10)
         # 初始化权重
         weights = np.array([self.alphas[i].get('weight', 1.0 / len(valid_indices))
                             for i in valid_indices])
