@@ -238,45 +238,29 @@ class Operators:
 
     @staticmethod
     def ts_std(data, window):
-        """标准差（智能处理小窗口）"""
+        """标准差（添加溢出保护）"""
         window = Operators._ensure_window_int(window)
 
         if isinstance(data, pd.Series):
-            if window < 3:
-                diff = data.diff().abs()
-                result = diff.rolling(window=max(window, 2), min_periods=1).mean()
-                return result.fillna(0)
-            else:
-                min_periods = min(3, window)
-                result = data.rolling(window=window, min_periods=min_periods).std()
-                return result.bfill().fillna(0)
+            with np.errstate(over='ignore', invalid='ignore'):
+                result = data.rolling(window=window, min_periods=min(3, window)).std()
+            return result.replace([np.inf, -np.inf], 0).bfill().fillna(0)
         else:
-            # NumPy实现
+            # NumPy实现保持不变但添加保护
             data = np.asarray(data)
             result = np.zeros_like(data, dtype=np.float64)
 
-            if window < 3:
-                # 小窗口：使用移动差分
-                diff = np.diff(data, prepend=data[0])
-                abs_diff = np.abs(diff)
+            for i in range(len(data)):
+                start_idx = max(0, i - window + 1)
+                window_data = data[start_idx:i + 1]
 
-                for i in range(len(data)):
-                    start_idx = max(0, i - max(window, 2) + 1)
-                    window_diff = abs_diff[start_idx:i + 1]
-                    result[i] = np.mean(window_diff) if len(window_diff) > 0 else 0
-            else:
-                # 正常窗口
-                for i in range(len(data)):
-                    start_idx = max(0, i - window + 1)
-                    window_data = data[start_idx:i + 1]
-
-                    if len(window_data) >= 2:
+                if len(window_data) >= 2:
+                    with np.errstate(all='ignore'):
                         result[i] = np.std(window_data, ddof=1)
-                    else:
-                        if i > 0:
-                            result[i] = abs(data[i] - data[i - 1]) / np.sqrt(2)
-                        else:
-                            result[i] = 0
+                    if not np.isfinite(result[i]):
+                        result[i] = 0
+                else:
+                    result[i] = 0
             return result
 
     @staticmethod
@@ -285,14 +269,9 @@ class Operators:
         window = Operators._ensure_window_int(window)
 
         if isinstance(data, pd.Series):
-            if window < 3:
-                diff = data.diff().abs()
-                result = diff.rolling(window=max(window, 2), min_periods=1).mean()
-                return (result ** 2).fillna(0)
-            else:
-                min_periods = min(3, window)
-                result = data.rolling(window=window, min_periods=min_periods).var()
-                return result.bfill().fillna(0)
+            with np.errstate(over='ignore', invalid='ignore'):
+                result = data.rolling(window=window, min_periods=min(3, window)).var()
+            return result.replace([np.inf, -np.inf], 0).bfill().fillna(0)
         else:
             # NumPy实现
             data = np.asarray(data)
@@ -603,4 +582,3 @@ class Operators:
             return result.fillna(0)
         else:
             raise TypeError("decay_linear operator requires pandas Series")
-

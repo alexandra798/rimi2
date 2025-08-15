@@ -148,7 +148,12 @@ class RPNValidator:
             return ['BEG']
 
         if len(token_sequence) >= 30:
-            return ['END'] if RPNValidator.can_terminate(token_sequence) else []
+            # 只有表达式真正完成时才允许END
+            if RPNValidator.can_terminate(token_sequence):
+                return ['END']
+            else:
+                # 无法终止，返回空列表强制结束episode
+                return []
 
         last_token = token_sequence[-1] if token_sequence else None
 
@@ -232,8 +237,23 @@ class RPNValidator:
 
     @staticmethod
     def can_terminate(token_sequence):
-        """检查是否可以终止（栈中正好剩1个操作数）"""
-        return RPNValidator.calculate_stack_size(token_sequence) == 1
+        """检查是否可以终止（严格版本）"""
+        if not token_sequence or len(token_sequence) < 2:
+            return False
 
+        # 检查末尾是否为需要参数的操作符
+        last_token = token_sequence[-1]
+        time_ops_need_delta = [
+            'ts_ref', 'ts_rank', 'ts_mean', 'ts_med', 'ts_sum',
+            'ts_std', 'ts_var', 'ts_max', 'ts_min', 'ts_skew',
+            'ts_kurt', 'ts_wma', 'ts_ema', 'corr', 'cov'
+        ]
+
+        if last_token.name in time_ops_need_delta:
+            return False  # 缺少delta参数，不可终止
+
+        # 检查栈平衡
+        stack_size = RPNValidator.calculate_stack_size(token_sequence)
+        return stack_size == 1
 
 

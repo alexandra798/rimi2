@@ -69,9 +69,8 @@ class RiskSeekingOptimizer:
                 if action not in valid_tokens:
                     # 记录一下，跳过该条，不要让整次训练崩
                     import logging
-                    logging.warning(f"Skip illegal pair in training: action={action}, valid={valid_tokens}")
+                    logging.debug(f"Skip illegal pair in training: action={action}, valid={valid_tokens}")
                     continue
-
 
                 # 编码 & 收集
                 states_enc.append(pre_state.encode_for_network())
@@ -100,10 +99,8 @@ class RiskSeekingOptimizer:
                 returns.insert(0, G)
             returns_tensor = torch.as_tensor(returns, dtype=torch.float32, device=self.device)
 
-
             masks_tensor = torch.as_tensor(masks, dtype=torch.bool, device=self.device)
             lengths_tensor = torch.as_tensor(lengths, dtype=torch.long, device=self.device)
- 
 
             # 前向传播
             action_probs, values, log_probs = self.policy_network(

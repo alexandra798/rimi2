@@ -308,4 +308,3 @@ class RewardCalculator:
 
         pred = self.linear_model.predict(X_mat)
         return float(calculate_ic(pred, y_vec))
-

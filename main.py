@@ -35,19 +35,23 @@ warnings.filterwarnings('ignore', category=ConstantInputWarning)
 def _preprocess_for_mcts(X: pd.DataFrame) -> pd.DataFrame:
     """对每列做 log1p + z-score；仅用于 MCTS/AlphaPool 的输入，不改动原始 X"""
     Xp = X.copy()
-    # 保险起见：若存在极少数负值（数据清洗瑕疵），先截到 0
     numeric_cols = Xp.select_dtypes(include=[np.number]).columns
-    Xp[numeric_cols] = np.clip(Xp[numeric_cols], a_min=0, a_max=1e6)
-    # log1p
-    Xp[numeric_cols] = np.log1p(Xp[numeric_cols])
 
-    Xp[numeric_cols] = np.clip(Xp[numeric_cols], -10, 20)
-    # z-score（按列）
-    mean = Xp[numeric_cols].mean(axis=0)
-    std = Xp[numeric_cols].std(axis=0)
-    std_safe = std.replace(0, 1.0)  # 防 0
-    Xp[numeric_cols] = (Xp[numeric_cols] - mean) / std_safe
-    Xp[numeric_cols] = np.clip(Xp[numeric_cols], -5, 5)
+    # 1. 截断极端值
+    Xp[numeric_cols] = np.clip(Xp[numeric_cols], a_min=-1e6, a_max=1e6)
+
+    # 2. log变换（对正值特征如volume）
+    for col in ['volume', 'vwap']:
+        if col in numeric_cols:
+            Xp[col] = np.log1p(np.abs(Xp[col]))
+
+    # 3. 标准化
+    with np.errstate(all='ignore'):  # 抑制中间计算警告
+        mean = Xp[numeric_cols].mean(axis=0)
+        std = Xp[numeric_cols].std(axis=0)
+        std_safe = std.replace(0, 1.0)
+        Xp[numeric_cols] = (Xp[numeric_cols] - mean) / std_safe
+        Xp[numeric_cols] = np.clip(Xp[numeric_cols], -5, 5)
     return Xp
 
 
@@ -160,6 +164,7 @@ def main(args):
     )
     # === 新增：仅供 MCTS/AlphaPool 使用的去量纲版本 ===
     X_train_mcts = _preprocess_for_mcts(X_train)
+    X_test_mcts = _preprocess_for_mcts(X_test) if args.backtest else None
 
     logger.info(f"Train shape: {X_train.shape}, Test shape: {X_test.shape}")
 

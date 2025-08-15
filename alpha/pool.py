@@ -45,11 +45,11 @@ class AlphaPool:
             values = alpha_values.values
         else:
             values = np.array(alpha_values)
-        
+
         # 检查是否为空
         if len(values) == 0:
             return False
-        
+
         # 确保是数值类型
         try:
             values = np.array(values, dtype=np.float64)
@@ -140,7 +140,6 @@ class AlphaPool:
         logger.info(f"Updating alpha pool with context {context_id}, {len(self.alphas)} formulas...")
 
         alphas_to_remove = []
-
 
         for i, alpha in enumerate(self.alphas):
             if 'context_id' in alpha and alpha['context_id'] != context_id:
@@ -284,13 +283,15 @@ class AlphaPool:
         y_clean = y[valid_mask]
 
         # === 新增：列标准化，防止数值爆炸 ===
-        col_mean = X_clean.mean(axis=0)
-        col_std = X_clean.std(axis=0)
-        eps = 1e-8
-        col_std_safe = np.where(col_std < eps, 1.0, col_std)  # 防 0
-        X_clean = (X_clean - col_mean) / col_std_safe
 
-        X_clean = np.clip(X_clean, -10, 10)
+        with np.errstate(all='ignore'):
+            col_mean = X_clean.mean(axis=0)
+            col_std = X_clean.std(axis=0)
+            eps = 1e-8
+            col_std_safe = np.where(col_std < eps, 1.0, col_std)
+            X_clean = (X_clean - col_mean) / col_std_safe
+            X_clean = np.clip(X_clean, -10, 10)
+
         # 初始化权重
         weights = np.array([self.alphas[i].get('weight', 1.0 / len(valid_indices))
                             for i in valid_indices])
