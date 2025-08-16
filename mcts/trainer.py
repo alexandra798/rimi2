@@ -211,19 +211,25 @@ class RiskMinerTrainer:
                         delta_state, self.X_train_sample, self.y_train_sample
                     )
                     trajectory.append((current.state, suitable_delta, delta_reward))
-                    current = delta_state  # 更新current以便后续添加END
+                    # 不要改变current的类型，使用delta_state作为新的状态
 
-            # 现在尝试添加END
-            if RPNValidator.can_terminate(current.state.token_sequence):
-                terminal_state = current.state.copy()
-                terminal_state.add_token('END')
-                terminal_reward = self.reward_calculator.calculate_terminal_reward(
-                    terminal_state, self.X_train_sample, self.y_train_sample
-                )
-                trajectory.append((current.state, 'END', terminal_reward))
-
-
-
+                    # 现在尝试添加END，使用delta_state而不是current
+                    if RPNValidator.can_terminate(delta_state.token_sequence):
+                        terminal_state = delta_state.copy()
+                        terminal_state.add_token('END')
+                        terminal_reward = self.reward_calculator.calculate_terminal_reward(
+                            terminal_state, self.X_train_sample, self.y_train_sample
+                        )
+                        trajectory.append((delta_state, 'END', terminal_reward))
+                else:
+                    # 如果没有delta，直接检查current.state
+                    if RPNValidator.can_terminate(current.state.token_sequence):
+                        terminal_state = current.state.copy()
+                        terminal_state.add_token('END')
+                        terminal_reward = self.reward_calculator.calculate_terminal_reward(
+                            terminal_state, self.X_train_sample, self.y_train_sample
+                        )
+                        trajectory.append((current.state, 'END', terminal_reward))
 
         return trajectory
 
