@@ -273,13 +273,6 @@ class FormulaEvaluator:
         return f"{formula}_{data_hash}_{allow_partial}"
 
 
-
-
-
-
-
-
-
     def evaluate_state(self, state, X_data) -> Optional[pd.Series]:
         try:
             rpn_string = ' '.join([t.name for t in state.token_sequence])

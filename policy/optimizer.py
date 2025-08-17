@@ -17,6 +17,7 @@ class RiskSeekingOptimizer:
         self.quantile_estimate = -1.0  # 当前分位数估计
         self.beta = 0.01  # 分位数更新学习率
         self.device = device if device else torch.device('cpu')
+        self.gamma = 1.0
 
         self.optimizer = torch.optim.Adam(
             policy_network.parameters(),
