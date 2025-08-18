@@ -5,7 +5,7 @@ import sys
 import os
 import torch
 
-from alpha import FormulaEvaluator
+from alpha.evaluator import FormulaEvaluator
 from core import TOKEN_DEFINITIONS
 from mcts.reward_calculator import RewardCalculator
 
@@ -62,6 +62,14 @@ class RiskMinerTrainer:
 
         for iteration in range(num_iterations):
             logger.info(f"\n=== Iteration {iteration + 1}/{num_iterations} ===")
+
+            # 每10轮清理一次缓存
+            if iteration > 0 and iteration % 10 == 0:
+                # 清理FormulaEvaluator缓存
+                self.formula_evaluator.clear_cache()
+                # 清理RewardCalculator缓存
+                self.reward_calculator._cache.clear()
+                logger.info("Cleared caches to free memory")
 
             # 阶段1：MCTS搜索收集轨迹
             trajectories = self.collect_trajectories_with_mcts(

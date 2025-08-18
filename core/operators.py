@@ -5,6 +5,10 @@ import logging
 
 from scipy import stats
 
+MAX_VALUE = 1e8  # 数值上限
+MIN_VALUE = -1e8  # 数值下限
+EPSILON = 1e-10  # 防止除零的最小值
+
 logger = logging.getLogger(__name__)
 
 
@@ -100,15 +104,36 @@ class Operators:
 
     @staticmethod
     def mul(operand1, operand2, data_length=None, data_index=None):
-        """乘法操作符"""
+        """乘法操作符（添加数值裁剪）"""
         operand1, operand2 = Operators._align_operands(operand1, operand2)
-        return operand1 * operand2
+        with np.errstate(over='ignore', invalid='ignore'):
+            result = operand1 * operand2
+            # 裁剪到合理范围
+            if isinstance(result, pd.Series):
+                result = result.clip(lower=MIN_VALUE, upper=MAX_VALUE)
+            else:
+                result = np.clip(result, MIN_VALUE, MAX_VALUE)
+        return result
 
     @staticmethod
     def div(operand1, operand2, data_length=None, data_index=None):
-        """安全除法操作符"""
+        """安全除法操作符（改进版）"""
         operand1, operand2 = Operators._align_operands(operand1, operand2)
-        return Operators.safe_divide(operand1, operand2)
+
+        # 防止极小除数
+        if isinstance(operand2, pd.Series):
+            operand2 = operand2.where(operand2.abs() > EPSILON, EPSILON)
+        else:
+            operand2 = np.where(np.abs(operand2) > EPSILON, operand2, EPSILON)
+
+        with np.errstate(over='ignore', divide='ignore', invalid='ignore'):
+            result = Operators.safe_divide(operand1, operand2)
+            # 裁剪结果
+            if isinstance(result, pd.Series):
+                result = result.clip(lower=MIN_VALUE, upper=MAX_VALUE)
+            else:
+                result = np.clip(result, MIN_VALUE, MAX_VALUE)
+        return result
 
     @staticmethod
     def greater(operand1, operand2, data_length=None, data_index=None):
@@ -236,18 +261,21 @@ class Operators:
                 result[i] = np.clip(np.sum(window_data), -1e10, 1e10)
             return result
 
+    # 修改 ts_std（在第303行左右）
     @staticmethod
     def ts_std(data, window):
-        """标准差（添加溢出保护）"""
+        """标准差（改进版，防溢出）"""
         window = Operators._ensure_window_int(window)
 
         if isinstance(data, pd.Series):
-            with np.errstate(over='ignore', invalid='ignore'):
-                result = data.rolling(window=window, min_periods=min(3, window)).std()
+            # 先裁剪输入数据
+            data_clipped = data.clip(lower=MIN_VALUE, upper=MAX_VALUE)
+            with np.errstate(all='ignore'):
+                result = data_clipped.rolling(window=window, min_periods=min(3, window)).std()
             return result.replace([np.inf, -np.inf], 0).bfill().fillna(0)
         else:
-            # NumPy实现保持不变但添加保护
-            data = np.asarray(data)
+            # NumPy实现也要裁剪
+            data = np.clip(np.asarray(data), MIN_VALUE, MAX_VALUE)
             result = np.zeros_like(data, dtype=np.float64)
 
             for i in range(len(data)):
@@ -256,9 +284,8 @@ class Operators:
 
                 if len(window_data) >= 2:
                     with np.errstate(all='ignore'):
-                        result[i] = np.std(window_data, ddof=1)
-                    if not np.isfinite(result[i]):
-                        result[i] = 0
+                        std_val = np.std(window_data, ddof=1)
+                        result[i] = 0 if not np.isfinite(std_val) else std_val
                 else:
                     result[i] = 0
             return result

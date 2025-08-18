@@ -124,11 +124,6 @@ class AlphaPool:
     def update_pool(self, X_data, y_data, evaluate_formula):
         """
         更新整个池：评估所有公式并优化权重
-
-        Args:
-            X_data: 特征数据
-            y_data: 目标数据
-            evaluate_formula: 公式评估函数
         """
         import hashlib
 
@@ -142,19 +137,15 @@ class AlphaPool:
         alphas_to_remove = []
 
         for i, alpha in enumerate(self.alphas):
-            if 'context_id' in alpha and alpha['context_id'] != context_id:
-                # 上下文不匹配，需要重新评估
-                alpha['values'] = None
-                alpha['context_id'] = context_id
-
-            if 'values' not in alpha or alpha['values'] is None:
+            # 每次都重新计算，不依赖缓存的values
+            if 'context_id' not in alpha or alpha['context_id'] != context_id:
                 try:
                     alpha['values'] = evaluate_formula.evaluate(
                         alpha['formula'],
                         X_data,
                         allow_partial=False
                     )
-                    alpha['context_id'] = context_id  # 记录上下文
+                    alpha['context_id'] = context_id
 
                     # 检查有效性
                     if not self.is_valid_alpha(alpha['values']):
@@ -168,7 +159,6 @@ class AlphaPool:
                         # 检查IC阈值
                         if abs(alpha['ic']) < 0.01:
                             alphas_to_remove.append(i)
-                            logger.debug(f"Removing low IC alpha: {alpha['formula'][:50]}... (IC={alpha['ic']:.4f})")
                     else:
                         alphas_to_remove.append(i)
 
@@ -176,25 +166,26 @@ class AlphaPool:
                     logger.warning(f"Failed to evaluate formula: {alpha['formula'][:50]}...")
                     alphas_to_remove.append(i)
 
-        # 2. 移除无效的alpha
-        for idx in reversed(alphas_to_remove):  # 反向删除避免索引错误
+        # 2. 移除无效的alpha（这个必须保留！）
+        for idx in reversed(alphas_to_remove):
             removed = self.alphas.pop(idx)
             logger.info(f"Removed invalid alpha: {removed['formula'][:50]}...")
 
-        # 3. 优化权重
+        # 3. 优化权重（这个必须保留！需要values）
         if len(self.alphas) > 0:
             self._optimize_weights_gradient_descent(X_data, y_data)
 
-        # 4. 根据IC排序
+        # 优化完成后，可以选择性地清理values以节省内存
+        for alpha in self.alphas:
+            if 'values' in alpha:
+                del alpha['values']  # 优化完成后删除values
+
+        # 4. 根据IC排序（保留）
         self.alphas.sort(key=lambda x: abs(x.get('ic', 0)), reverse=True)
 
-        # 5. 保持池大小
+        # 5. 保持池大小（保留）
         if len(self.alphas) > self.pool_size:
             self.alphas = self.alphas[:self.pool_size]
-
-        logger.info(f"Pool updated: {len(self.alphas)} valid alphas")
-        logger.info(
-            f"Statistics: {self.rejected_constant_count} constants rejected, {self.rejected_low_ic_count} low IC rejected")
 
     def maintain_pool(self, new_alpha, X_data, y_data):
         """

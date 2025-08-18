@@ -1,3 +1,5 @@
+from collections import OrderedDict
+
 import numpy as np
 from scipy.stats import spearmanr, pearsonr
 import logging
@@ -5,7 +7,7 @@ from sklearn.linear_model import LinearRegression
 import pandas as pd
 from utils.metrics import calculate_ic
 from core import RPNEvaluator,RPNValidator
-from alpha import FormulaEvaluator
+from alpha.evaluator import FormulaEvaluator
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +18,7 @@ class RewardCalculator:
     """
 
     def __init__(self, alpha_pool, lambda_param=0.1, sample_size=5000,
-                 pool_size=100, min_std=1e-6, random_seed=42):
+                 pool_size=100, min_std=1e-6, random_seed=42, cache_size=500):
         self.alpha_pool = alpha_pool
         self.lambda_param = lambda_param
         self.sample_size = sample_size
@@ -24,10 +26,17 @@ class RewardCalculator:
         self.min_std = min_std  # 新增：最小标准差阈值
         self.random_seed = random_seed  # 保存seed
         self.formula_evaluator = FormulaEvaluator()
-        self._cache = {}
+        self.cache_size = cache_size
+        self._cache = OrderedDict()
+
         self.constant_penalty_count = 0
 
         self.rng = np.random.RandomState(random_seed)
+
+    def _manage_cache(self):
+        """管理缓存大小"""
+        while len(self._cache) > self.cache_size:
+            self._cache.popitem(last=False)
 
     def _finite_series(x, index=None):
         import numpy as np
@@ -79,6 +88,7 @@ class RewardCalculator:
     def calculate_intermediate_reward(self, state, X_data, y_data):
         cache_key = ' '.join([t.name for t in state.token_sequence])
         if cache_key in self._cache:
+            self._cache.move_to_end(cache_key)  # LRU更新
             return self._cache[cache_key]
 
         if not RPNValidator.is_valid_partial_expression(state.token_sequence):
@@ -151,8 +161,10 @@ class RewardCalculator:
                 else:
                     result = ic + diversity_bonus
 
+
             # 缓存结果
             self._cache[cache_key] = result
+            self._manage_cache()
             return result
 
         except Exception as e:

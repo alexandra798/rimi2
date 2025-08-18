@@ -2,8 +2,8 @@ import pandas as pd
 import numpy as np
 import logging
 import signal
-from contextlib import contextmanager
 from functools import lru_cache
+from collections import OrderedDict
 from typing import Union, Dict, Optional, Any
 
 from core import RPNEvaluator, RPNValidator, TOKEN_DEFINITIONS, Operators
@@ -13,11 +13,27 @@ logger = logging.getLogger(__name__)
 
 class FormulaEvaluator:
 
-    def __init__(self):
-
+    def __init__(self, cache_size=1000):  # 添加缓存大小参数
         self.rpn_evaluator = RPNEvaluator
         self.operators = Operators
-        self._result_cache = {}  # 结果缓存
+        # 使用有限大小的OrderedDict实现LRU缓存
+        self.cache_size = cache_size
+        self._result_cache = OrderedDict()  # 改为OrderedDict
+        self._cache_hits = 0
+        self._cache_misses = 0
+
+    def _manage_cache(self):
+        """管理缓存大小"""
+        while len(self._result_cache) > self.cache_size:
+            # 删除最旧的条目（FIFO）
+            self._result_cache.popitem(last=False)
+
+    def clear_cache(self):
+        """清空缓存（供外部调用）"""
+        self._result_cache.clear()
+        logger.info(f"Cache cleared. Hits: {self._cache_hits}, Misses: {self._cache_misses}")
+        self._cache_hits = 0
+        self._cache_misses = 0
 
     def evaluate(self, formula: str, data: Union[pd.DataFrame, Dict],
                  allow_partial: bool = False) -> pd.Series:
@@ -30,9 +46,15 @@ class FormulaEvaluator:
             评估结果的Series，失败时返回NaN Series
         """
         cache_key = self._generate_cache_key(formula, data, allow_partial)
+
         if cache_key in self._result_cache:
+            # 移到末尾（最近使用）
+            self._result_cache.move_to_end(cache_key)
+            self._cache_hits += 1
             logger.debug(f"Cache hit for formula: {formula[:50]}...")
             return self._result_cache[cache_key].copy()
+
+        self._cache_misses += 1
 
         # 执行评估
         try:
@@ -40,14 +62,12 @@ class FormulaEvaluator:
             # 缓存结果
             if result is not None:
                 self._result_cache[cache_key] = result.copy()
+                self._manage_cache()  # 检查并清理过多的缓存
             return result
 
-        except TimeoutError as e:
-            logger.warning(f"Formula evaluation timed out: {formula[:50]}...")
-            return self._create_nan_series(data)
+
         except Exception as e:
             logger.error(f"Error evaluating formula '{formula[:50]}...': {str(e)}")
-            logger.debug(f"Exception type: {type(e).__name__}", exc_info=True)
             return self._create_nan_series(data)
 
     def _evaluate_impl(self, formula: str, data: Union[pd.DataFrame, Dict],
