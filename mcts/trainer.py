@@ -49,7 +49,11 @@ class RiskMinerTrainer:
         self.mdp_env = AlphaMiningMDP()
         self.policy_network = PolicyNetwork().to(self.device)
         self.optimizer = RiskSeekingOptimizer(self.policy_network, device=self.device)
-        self.mcts_searcher = MCTSSearcher(self.policy_network, device=self.device)
+        self.mcts_searcher = MCTSSearcher(
+            policy_network=self.policy_network,
+            device=self.device,
+            c_puct=1.414  # 使用固定的c_puct值
+        )
         self.alpha_pool = []
         self.reward_calculator = RewardCalculator(self.alpha_pool, random_seed=random_seed)
         self.formula_evaluator = FormulaEvaluator()  # 使用统一的评估器
@@ -140,9 +144,11 @@ class RiskMinerTrainer:
 
         for trajectory in trajectories:
             if trajectory:  # 确保轨迹非空
-                loss = self.optimizer.train_on_episode(trajectory)
-                if loss > 0:  # 只有超过分位数的轨迹才会产生损失
-                    total_loss += loss
+
+
+                updated, loss = self.optimizer.train_on_episode(trajectory)
+                if updated:
+                    total_loss += abs(loss)  # 统计绝对值，方便日志
                     num_updates += 1
 
         avg_loss = total_loss / max(num_updates, 1)
@@ -290,7 +296,7 @@ class RiskMinerTrainer:
                             continue
 
                         # 计算IC
-                        ic = self.reward_calculator.calculate_ic(alpha_values, self.y_data)
+                        ic = self.reward_calculator.calculate_ic(alpha_values, self.y_train_sample)
 
                         # 只添加IC足够高的公式
                         if abs(ic) >= 0.01:

@@ -25,7 +25,6 @@ class PolicyNetwork(nn.Module):
             dropout=0.1
         )
 
-
         # 策略头（输出每个Token的选择概率）
         self.policy_head = nn.Sequential(
             nn.Linear(64, 32),
@@ -37,14 +36,7 @@ class PolicyNetwork(nn.Module):
             nn.Linear(32, action_dim)  # 输出所有Token的logits
         )
 
-        # 价值头（可选，用于评估状态价值）
-        self.value_head = nn.Sequential(
-            nn.Linear(64, 32),
-            nn.ReLU(),
-            nn.Linear(32, 1)
-        )
-
-    def forward(self, state_encoding, valid_actions_mask=None, lengths=None,return_log_probs=False):
+    def forward(self, state_encoding, valid_actions_mask=None, lengths=None, return_log_probs=False):
         """
         Args:
             state_encoding: [batch_size, seq_len, state_dim] 状态编码
@@ -61,13 +53,11 @@ class PolicyNetwork(nn.Module):
 
         if lengths is not None:
             # 取最后一个有效步
-            # lengths 为实际步数，转为索引需要 -1，并裁到 [0, L-1]
             L = gru_out.size(1)
-            idx = (lengths - 1).clamp(min=0, max=L - 1)  # [B]
+            idx = (lengths - 1).clamp(min=0, max=L - 1)
             last_hidden = gru_out[torch.arange(gru_out.size(0), device=gru_out.device), idx, :]
         else:
-            last_hidden = gru_out[:, -1, :]  # 回退：用最后一行
-
+            last_hidden = gru_out[:, -1, :]  # 使用最后一个时间步
 
         # 计算动作logits
         action_logits = self.policy_head(last_hidden)  # [batch_size, action_dim]
@@ -84,24 +74,22 @@ class PolicyNetwork(nn.Module):
 
         # “全非法行”兜底（避免整行都是 -inf 导致 NaN）
         if valid_actions_mask is not None:
-            all_invalid = (~valid_actions_mask).all(dim=-1, keepdim=True)  # [batch,1]
+            all_invalid = (~valid_actions_mask).all(dim=-1, keepdim=True)
             if all_invalid.any():
                 # 退路：固定把 'END' 的概率设为 1（或您项目里 END 的索引）
                 end_idx = TOKEN_TO_INDEX.get('END', 0)
                 fallback = torch.zeros_like(action_probs)
                 fallback[..., end_idx] = 1.0
                 action_probs = torch.where(all_invalid, fallback, action_probs)
-                # 同时修正log_probs
+
                 fallback_log = torch.full_like(log_probs, float('-inf'))
                 fallback_log[..., end_idx] = 0.0
                 log_probs = torch.where(all_invalid, fallback_log, log_probs)
-        # 价值头
-        state_value = self.value_head(last_hidden)
 
         if return_log_probs:
-            return action_probs, state_value, log_probs
+            return action_probs, log_probs
         else:
-            return action_probs, state_value
+            return action_probs
 
     def get_action(self, state, temperature=1.0):
         """
@@ -128,7 +116,7 @@ class PolicyNetwork(nn.Module):
         with torch.no_grad():
             # 直接拿 logits，再统一做 mask/温度/softmax，避免对概率再取 log
             # 复用 forward 的逻辑即可：传入 valid_actions_mask，内部已做掩码与兜底
-            action_probs, _ = self.forward(state_encoding, valid_actions_mask)
+            action_probs = self.forward(state_encoding, valid_actions_mask)
 
             if temperature != 1.0:
                 # 取对数等效于作用在 logits 上的温度缩放（forward 里已做 log_softmax）

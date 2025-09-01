@@ -5,7 +5,9 @@ from scipy.stats import spearmanr, pearsonr
 import logging
 from sklearn.linear_model import LinearRegression
 import pandas as pd
-from utils.metrics import calculate_ic
+from sklearn.linear_model import Lasso
+
+from utils.metrics import calculate_ic as _ic, calculate_ic
 from core import RPNEvaluator,RPNValidator
 from alpha.evaluator import FormulaEvaluator
 
@@ -19,6 +21,7 @@ class RewardCalculator:
 
     def __init__(self, alpha_pool, lambda_param=0.1, sample_size=5000,
                  pool_size=100, min_std=1e-6, random_seed=42, cache_size=500):
+        self.utils_metrics = None
         self.alpha_pool = alpha_pool
         self.lambda_param = lambda_param
         self.sample_size = sample_size
@@ -61,29 +64,7 @@ class RewardCalculator:
         std = np.std(valid_values)
         return std < self.min_std
 
-    def _build_design_matrix(self, formulas, X_ctx, y_ctx):
-        """构建设计矩阵时确保数据对齐"""
-        cols = []
-        for f in formulas:
-            s = self.formula_evaluator.evaluate(f, X_ctx, allow_partial=False)
-            if s is None:
-                continue
-            if not isinstance(s, pd.Series):
-                s = pd.Series(np.asarray(s).reshape(-1), index=X_ctx.index)
-            s = s.replace([np.inf, -np.inf], np.nan).rename(f)
-            cols.append(s)
 
-        if not cols:
-            return None, None
-
-        # 使用内连接确保所有数据对齐
-        df = pd.concat(cols + [y_ctx.rename('_y')], axis=1, join='inner').dropna()
-        if df.shape[0] < 50 or df.shape[1] <= 1:
-            return None, None
-
-        X_mat = df.drop(columns=['_y']).to_numpy()
-        y_vec = df['_y'].to_numpy()
-        return X_mat, y_vec
 
     def calculate_intermediate_reward(self, state, X_data, y_data):
         cache_key = ' '.join([t.name for t in state.token_sequence])
@@ -229,45 +210,31 @@ class RewardCalculator:
             logger.error(f"Error in terminal reward: {e}")
             return -0.5
 
-
-
     def calculate_ic(self, predictions, targets):
-        """计算IC（Pearson相关系数）-使用pandas对齐"""
+        # 统一走 utils 的对齐与 Spearman
         try:
-            # 转为Series（如果不是）
-            if not isinstance(predictions, pd.Series):
-                if hasattr(predictions, 'values'):
-                    predictions = pd.Series(predictions.values)
-                else:
-                    predictions = pd.Series(np.array(predictions).flatten())
-
-            if not isinstance(targets, pd.Series):
-                if hasattr(targets, 'values'):
-                    targets = pd.Series(targets.values)
-                else:
-                    targets = pd.Series(np.array(targets).flatten())
-
-            # ===== 使用pandas对齐 =====
-
-            df = pd.concat([predictions.rename('pred'), targets.rename('target')],
-                           axis=1, join='inner')
-            df = df.replace([np.inf, -np.inf], np.nan).dropna()
-
-            if len(df) < 2:
-                return 0.0
-
-            # 常数检测
-            if df['pred'].std() < self.min_std or df['target'].std() < self.min_std:
-                logger.debug("IC calculation skipped: constant values detected")
-                return 0.0
-
-            corr, _ = pearsonr(df['pred'], df['target'])
-
-            return float(corr) if not np.isnan(corr) else 0.0
-
+            return float(_ic(predictions, targets, method='spearman'))
         except Exception as e:
             logger.error(f"Error calculating IC: {e}")
             return 0.0
+
+    def calculate_daily_rank_ic(self, predictions, targets, X_like):
+        import pandas as pd, numpy as np
+        # 取出 date 索引
+        if isinstance(X_like.index, pd.MultiIndex) and 'date' in X_like.index.names:
+            dates = X_like.index.get_level_values('date')
+        elif 'date' in getattr(X_like, 'columns', []):
+            dates = X_like['date']
+        else:
+            return self.calculate_ic(predictions, targets)
+
+        pred = pd.Series(getattr(predictions, 'values', predictions), index=targets.index)
+        df = pd.concat([pred.rename('pred'), targets.rename('y'), dates.rename('date')], axis=1).dropna()
+        if df.empty: return 0.0
+
+        by_day = df.groupby('date').apply(lambda g: _ic(g['pred'], g['y'], method='spearman'))
+        by_day = by_day.replace([np.inf, -np.inf], np.nan).dropna()
+        return float(by_day.mean()) if len(by_day) else 0.0
 
     def _calculate_mutual_ic(self, alpha1_values, alpha2_values):
         """计算两个alpha的相互IC"""
@@ -297,26 +264,76 @@ class RewardCalculator:
             logger.error(f"Error calculating mutual IC: {e}")
             return 0.0
 
-    def _calculate_composite_ic(self, X_data, y_data):
-        if len(self.alpha_pool) == 0:
+    def _build_design_matrix(self, alpha_pool_dict, y_series):
+        """
+        alpha_pool_dict: { name: pd.Series(index=y.index) }
+        返回对齐后的 X_mat (n, k) 与 y_vec (n,)
+        """
+        cols = []
+        for k, s in alpha_pool_dict.items():
+            s = pd.Series(s).rename(k)
+            cols.append(s)
+        df = pd.concat(cols + [pd.Series(y_series).rename("__y__")], axis=1).dropna()
+        if df.empty:
+            return None, None, []
+        y_vec = df.pop("__y__").values.astype(float)
+        names = list(df.columns)
+        X_mat = df.values.astype(float)
+        return X_mat, y_vec, names
+
+    def _calculate_composite_ic(self, alpha_pool_dict, y_series, lasso_alpha=1e-3, max_iter=5000):
+        """
+        用 Lasso(fit_intercept=False) 合成；返回 (composite_series, coef_series)
+        """
+        X_mat, y_vec, names = self._build_design_matrix(alpha_pool_dict, y_series)
+        if X_mat is None:  # 兜底
+            return None, pd.Series(dtype=float)
+        if X_mat.shape[1] == 0:
+            return None, pd.Series(dtype=float)
+
+        model = Lasso(alpha=lasso_alpha, fit_intercept=False, max_iter=max_iter)
+        model.fit(X_mat, y_vec)
+        coefs = pd.Series(model.coef_, index=names)
+
+        # 稀疏：仅用非零系数做合成
+        nz = (np.abs(coefs) > 1e-12)
+        if nz.sum() == 0:
+            # 全零兜底：退回到简单平均
+            weights = pd.Series(1.0, index=names) / max(1, len(names))
+        else:
+            weights = coefs[nz]
+
+        # 重新拼回索引对齐的复合因子
+        parts = []
+        for name, w in weights.items():
+            parts.append(pd.Series(alpha_pool_dict[name]) * float(w))
+        comp = None if not parts else pd.concat(parts, axis=1).sum(axis=1)
+        return comp, coefs
+    
+    def _orthogonalized_gain(self, f_series, selected_mat_or_none, y_series):
+        """
+        计算“对已选集合正交后的边际 RankIC”
+        f_series: pd.Series(index=y.index)
+        selected_mat_or_none: np.ndarray of shape (n, k) or None
+        y_series: pd.Series(index=f_series.index)
+        """
+        f = pd.concat([pd.Series(f_series).rename("f"), pd.Series(y_series).rename("y")], axis=1).dropna()
+        if f.empty:
             return 0.0
 
-            # 仅取有公式字段的
-        formulas = [a['formula'] for a in self.alpha_pool if 'formula' in a]
-        X_mat, y_vec = self._build_design_matrix(formulas, X_data, y_data)
-        if X_mat is None:
-            # 回退：用池内 alpha 的平均 IC
-            valid_ic = [a.get('ic', 0.0) for a in self.alpha_pool if 'ic' in a]
-            return float(np.mean(valid_ic)) if valid_ic else 0.0
+        f_vec = f["f"].values.astype(float)
+        y_vec = f["y"].values.astype(float)
 
-        self.linear_model = LinearRegression(fit_intercept=False)
-        self.linear_model.fit(X_mat, y_vec)
+        if selected_mat_or_none is None or selected_mat_or_none.shape[1] == 0:
+            resid = f_vec
+        else:
+            coef, *_ = np.linalg.lstsq(selected_mat_or_none, f_vec, rcond=None)
+            resid = f_vec - selected_mat_or_none @ coef
 
-        # 同步权重（可选）
-        weights = self.linear_model.coef_
-        for i, a in enumerate(self.alpha_pool):
-            if i < len(weights):
-                a['weight'] = float(weights[i])
-
-        pred = self.linear_model.predict(X_mat)
-        return float(calculate_ic(pred, y_vec))
+        # 残差与 y 的 Spearman
+        r = pd.Series(resid, index=f.index)
+        y = pd.Series(y_vec, index=f.index)
+        try:
+            return float(self.utils_metrics.calculate_ic(r, y, method='spearman'))
+        except Exception:
+            return 0.0

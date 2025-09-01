@@ -12,26 +12,18 @@ logger = logging.getLogger(__name__)
 class MCTSSearcher:
     """MCTS搜索器 - 实现PUCT选择和树搜索"""
 
-    def __init__(self, policy_network=None, device=None,
-                 initial_c_puct=1.414, c_puct_decay=0.995, min_c_puct=0.5):
+    def __init__(self, policy_network=None, device=None, c_puct=1.414, alpha_diversity=0.1):
         self.policy_network = policy_network
         self.device = device
         self.gamma = 1.0
 
-        # 探索退火参数
-        self.initial_c_puct = initial_c_puct
-        self.current_c_puct = initial_c_puct
-        self.c_puct_decay = c_puct_decay
-        self.min_c_puct = min_c_puct
-        self.iteration_count = 0
+        self.c_puct = c_puct  # 论文默认值sqrt(2)
+        self.alpha_diversity = alpha_diversity
+        self.subtree_counter = {} # key(hash of token seq) -> int
 
-    def update_exploration_rate(self):
-        """更新探索率（退火）"""
-        self.current_c_puct = max(
-            self.min_c_puct,
-            self.initial_c_puct * (self.c_puct_decay ** self.iteration_count)
-        )
-        self.iteration_count += 1
+    def _hash_seq(self, token_seq):
+        # 假设 token 有 name 属性；没有就转 str(token)
+        return hash(tuple(getattr(t, "name", str(t)) for t in token_seq))
 
     def search_one_iteration(self, root_node, mdp_env, reward_calculator, X_data, y_data):
         #执行一次完整的MCTS迭代
@@ -45,9 +37,9 @@ class MCTSSearcher:
         path = []
         current = root_node
 
-        # 使用PUCT选择直到叶节点
+        # 使用固定的c_puct进行PUCT选择
         while current.is_expanded() and not current.is_terminal():
-            current = current.get_best_child(c_puct=self.current_c_puct)
+            current = current.get_best_child(c_puct=self.c_puct)  # 使用固定值
             if current is None:
                 break
             path.append(current)
@@ -62,6 +54,7 @@ class MCTSSearcher:
                 logger.debug(f"Intermediate reward calculation took {time.time() - reward_start:.2f}s")
                 current.update_intermediate_reward(intermediate_reward)
         logger.debug(f"Selection phase took {time.time() - start:.2f}s")
+
         # 阶段2：扩展（Expansion）
         leaf_value = 0
         if not current.is_terminal() and current.N >= 0:
@@ -71,7 +64,6 @@ class MCTSSearcher:
             # 选择一个新扩展的子节点进行评估
             if current.children:
                 # 根据先验概率选择
-
                 probs = [child.P for child in current.children.values()]
                 probs = np.array(probs, dtype=np.float64)
                 probs = np.where(np.isfinite(probs) & (probs >= 0.0), probs, 0.0)
@@ -82,7 +74,6 @@ class MCTSSearcher:
                     probs = probs / s
 
                 selected_idx = np.random.choice(len(current.children), p=probs)
-
                 selected_action = list(current.children.keys())[selected_idx]
                 current = current.children[selected_action]
                 path.append(current)
@@ -98,38 +89,34 @@ class MCTSSearcher:
             # 执行rollout评估叶节点价值
             value = self.rollout(current, mdp_env, reward_calculator, X_data, y_data)
 
-        # 阶段4：回传（Backpropagation）- 按照论文公式
+        # 阶段4：回传（Backpropagation）
         self.backpropagate(path, value, reward_calculator, X_data, y_data)
 
         # 构建轨迹用于策略网络训练
         trajectory = self.extract_trajectory(path)
 
-        self.update_exploration_rate()
-
         return trajectory
 
     def expand(self, node, mdp_env):
-        """
-        扩展节点，调用风险策略网络获取先验概率P(s,a)
-        """
+        """扩展节点，调用策略网络获取先验概率P(s,a)"""
         if node.state is None:
             return 0
 
         # 获取所有合法动作
         valid_actions = mdp_env.get_valid_actions(node.state)
-
         if not valid_actions:
             return 0
 
-        # 使用策略网络获取先验概率和价值估计
+        # 使用策略网络获取先验概率（不再获取价值估计）
         if self.policy_network:
-            action_probs, value_estimate = self.get_policy_predictions(node.state, valid_actions)
+            action_probs = self.get_policy_predictions(node.state, valid_actions)
+            value_estimate = 0  # 不再使用价值估计
         else:
             # 均匀分布
             action_probs = {action: 1.0 / len(valid_actions) for action in valid_actions}
             value_estimate = 0
 
-        # 为每个合法动作创建子节点，设置初始值
+        # 为每个合法动作创建子节点
         for action in valid_actions:
             # 创建新状态
             new_state = node.state.copy()
@@ -154,14 +141,12 @@ class MCTSSearcher:
         while depth < max_depth and not current_state.token_sequence[-1].name == 'END':
             # 获取合法动作
             valid_actions = mdp_env.get_valid_actions(current_state)
-
             if not valid_actions:
                 break
 
-            # 使用策略网络选择动作（如果有）
+            # 使用策略网络选择动作
             if self.policy_network:
-                action_probs, _ = self.get_policy_predictions(current_state, valid_actions)
-
+                action_probs = self.get_policy_predictions(current_state, valid_actions)
                 probs = [action_probs.get(a, 0.0) for a in valid_actions]
                 probs = np.array(probs, dtype=np.float64)
                 probs = np.where(np.isfinite(probs) & (probs >= 0.0), probs, 0.0)
@@ -171,7 +156,6 @@ class MCTSSearcher:
                 else:
                     probs = probs / s
                 action = np.random.choice(valid_actions, p=probs)
-
             else:
                 # 随机选择
                 action = np.random.choice(valid_actions)
@@ -181,12 +165,10 @@ class MCTSSearcher:
 
             # 计算奖励
             if action == 'END':
-                # 终止奖励
                 reward = reward_calculator.calculate_terminal_reward(
                     current_state, X_data, y_data
                 )
             else:
-                # 中间奖励
                 if RPNValidator.is_valid_partial_expression(current_state.token_sequence):
                     reward = reward_calculator.calculate_intermediate_reward(
                         current_state, X_data, y_data
@@ -201,7 +183,7 @@ class MCTSSearcher:
                 break
 
         # 计算累积奖励（论文：γ=1）
-        v_l = 0  # 叶节点价值
+        v_l = 0
         for reward in reversed(intermediate_rewards):
             v_l = reward + self.gamma * v_l
 
@@ -222,7 +204,6 @@ class MCTSSearcher:
         rewards = []
         for i, node in enumerate(path):
             if i > 0:  # 跳过根节点
-                # 使用节点存储的中间奖励
                 rewards.append(node.R)
 
         # l是最后一个节点的索引
@@ -251,19 +232,15 @@ class MCTSSearcher:
         用于策略网络训练
         """
         trajectory = []
-
         for i, node in enumerate(path):
             if node.parent and node.action:
-                # (state, action, reward)
                 trajectory.append((
                     node.parent.state,
                     node.action,
                     node.R  # 使用存储的中间奖励
                 ))
-
         return trajectory
 
-    # 此功能要使用transformer吗？思考这个问题
     def get_policy_predictions(self, state, valid_actions):
         """
         使用策略网络获取动作概率分布P(s,a)和价值估计
@@ -282,12 +259,7 @@ class MCTSSearcher:
         valid_actions_mask = valid_actions_mask.unsqueeze(0).to(self.device)
 
         with torch.no_grad():
-            # 不需要log_probs，只要action_probs
-            result = self.policy_network(state_encoding, valid_actions_mask, return_log_probs=False)
-            if len(result) == 3:
-                action_probs, value, _ = result
-            else:
-                action_probs, value = result
+            action_probs = self.policy_network(state_encoding, valid_actions_mask, return_log_probs=False)
 
         # 转换并清洗为概率字典（非负、有限、和为1；否则均匀分布）
         probs = {}
@@ -309,7 +281,7 @@ class MCTSSearcher:
         for action, p in zip(valid_actions, raw):
             probs[action] = float(p)
 
-        return probs, float(value.item())
+        return probs
 
     def get_best_action(self, root_node, temperature=1.0):
         """

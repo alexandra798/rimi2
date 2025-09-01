@@ -7,11 +7,8 @@ MCTS_CONFIG = {
     "max_episode_length": 30,
     "num_simulations": 200,
 
-
     "gamma": 1.0,
     "c_puct": 1.414,  # sqrt(2) 是常用默认值，可根据实验调整
-    "c_puct_decay": 0.995,  # 探索衰减率
-    "c_puct_min": 0.5,  # 最小探索值
 
     'exploration_constant': 1.414,
     'min_window_size': 3,  # 新增：最小窗口大小
